@@ -1,0 +1,70 @@
+{
+  "global": {
+    "tabEnableClose": false,
+    "tabEnableFloat": true,
+    "tabSetEnableMaximize": true,
+    "tabSetTabStripHeight": 32,
+    "splitterSize": 4
+  },
+  "layout": {
+    "type": "row",
+    "children": [
+      {
+        "type": "column",
+        "weight": 68,
+        "children": [
+          {
+            "type": "tabset",
+            "weight": 65,
+            "children": [
+              { "type": "tab", "name": "BTCUSDC Perp", "component": "chart" },
+              { "type": "tab", "name": "TradingView", "component": "chart" }
+            ]
+          },
+          {
+            "type": "tabset",
+            "weight": 35,
+            "children": [
+              { "type": "tab", "name": "Positions(0)", "component": "positions" },
+              { "type": "tab", "name": "Open Orders(0)", "component": "positions" }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "column",
+        "weight": 17,
+        "children": [
+          {
+            "type": "tabset",
+            "weight": 60,
+            "children": [
+              { "type": "tab", "name": "Order Book", "component": "orderBook" }
+            ]
+          },
+          {
+            "type": "tabset",
+            "weight": 40,
+            "children": [
+              { "type": "tab", "name": "Trades", "component": "trades" }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "column",
+        "weight": 15,
+        "children": [
+          {
+            "type": "tabset",
+            "weight": 100,
+            "children": [
+              { "type": "tab", "name": "Place Order", "component": "orderForm" },
+              { "type": "tab", "name": "Assets", "component": "assets" }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
