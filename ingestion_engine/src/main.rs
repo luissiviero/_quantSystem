@@ -1,41 +1,39 @@
-mod models;
-mod interfaces;
-mod exchanges;
-mod engine;
-mod server;
+// @file: main.rs
+// @description: Entry point for the ingestion engine.
+// @author: v5 helper
 
-use crate::engine::IngestionEngine;
-use crate::server::Server;
-use crate::exchanges::binance::BinanceSource;
-use tokio::sync::mpsc;
-use log::info; 
+mod models;
+mod engine;
+mod exchanges;
+mod server;
+mod interfaces;
+
+use crate::engine::Engine;
+use tokio::task;
+
+//
+// MAIN EXECUTION
+//
 
 #[tokio::main]
 async fn main() {
-    // 1. Initialize Logger with a default level of "info"
-    // This ensures you see the logs even without setting RUST_LOG environment variable
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // 1. Initialize Shared Engine State
+    let engine: Engine = Engine::new();
 
-    info!(">>> Ingestion Engine is Starting... <<<");
+    println!("Starting QuantSystem Ingestion Engine...");
 
-    // 2. Create Channels (The Pipes)
-    let (cmd_tx, cmd_rx) = mpsc::channel(100);
-    let (data_tx, data_rx) = mpsc::channel(1000);
-
-    // 3. Setup Engine
-    let mut engine = IngestionEngine::new();
-    let binance = BinanceSource::new();
-    engine.add_source(Box::new(binance));
-
-    // 4. Setup Server
-    let server = Server::new();
-
-    // 5. Run Components
-    tokio::spawn(async move {
-        engine.run(cmd_rx, data_tx).await;
+    // 2. Spawn Binance Handler (BTCUSDT)
+    let engine_clone_binance: Engine = engine.clone();
+    let binance_task = task::spawn(async move {
+        exchanges::binance::connect_binance("BTCUSDT".to_string(), engine_clone_binance).await;
     });
 
-    info!(">>> Engine running. Starting Server on port 3000... <<<");
+    // 3. Spawn WebSocket Server for Frontend
+    let engine_clone_server: Engine = engine.clone();
+    let server_task = task::spawn(async move {
+        server::start_server(engine_clone_server).await;
+    });
 
-    server.run(data_rx, cmd_tx).await;
+    // 4. Await tasks
+    let _ = tokio::join!(binance_task, server_task);
 }

@@ -1,129 +1,128 @@
-// ingestion_engine/src/exchanges/binance.rs
-use crate::interfaces::MarketSource;
-use crate::models::{DataType, MarketData, Trade, OrderBook};
-use async_trait::async_trait;
-use futures_util::{StreamExt, SinkExt};
-use tokio::sync::mpsc;
+// @file: binance.rs
+// @description: Handles WebSocket connections and parsing for Binance.
+// @author: v5 helper
+
+use futures_util::StreamExt; // Fixed: Removed SinkExt warning
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use serde_json::Value;
+use crate::engine::Engine;
+use crate::models::{OrderBook, PriceLevel, Trade};
 use url::Url;
-use log::{info, error, warn};
 
-pub struct BinanceSource {
-    ws_tx: mpsc::UnboundedSender<String>,
-}
+//
+// CONSTANTS
+//
 
-impl BinanceSource {
-    pub fn new() -> Self {
-        let (tx, _rx) = mpsc::unbounded_channel(); 
-        Self { ws_tx: tx } 
-    }
-}
+const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/ws";
 
-#[async_trait]
-impl MarketSource for BinanceSource {
-    async fn start(&mut self, data_pipe: mpsc::Sender<MarketData>) -> Result<(), String> {
-        let url = Url::parse("wss://stream.binance.com:9443/ws").map_err(|e| e.to_string())?;
-        info!("Connecting to Binance WebSocket...");
+//
+// CONNECTION LOGIC
+//
 
-        let (ws_stream, _) = connect_async(url).await.map_err(|e| e.to_string())?;
-        info!("Binance Connected Successfully.");
+pub async fn connect_binance(symbol: String, engine: Engine) {
+    // 1. Format the stream URL (lowercase symbol required by Binance)
+    let stream_name: String = format!("{}@depth20/{}@trade", symbol.to_lowercase(), symbol.to_lowercase());
+    let url_str: String = format!("{}/{}", BINANCE_WS_URL, stream_name);
+    let url: Url = Url::parse(&url_str).expect("Bad URL");
 
-        let (mut write, mut read) = ws_stream.split();
+    println!("Connecting to Binance: {}", url);
 
-        let (internal_tx, mut internal_rx) = mpsc::unbounded_channel();
-        self.ws_tx = internal_tx;
+    // 2. Establish WebSocket connection
+    let (ws_stream, _) = connect_async(url).await.expect("Failed to connect");
+    let (_, mut read) = ws_stream.split();
 
-        // Writer Task
-        tokio::spawn(async move {
-            while let Some(msg) = internal_rx.recv().await {
-                // info!("Sending to Binance: {}", msg); 
-                if let Err(e) = write.send(Message::Text(msg)).await {
-                    error!("Failed to send message to Binance: {}", e);
-                }
-            }
-        });
+    // 3. Process incoming messages
+    while let Some(msg) = read.next().await {
+        match msg {
+            Ok(Message::Text(text)) => {
+                // 4. Parse JSON
+                let v: Value = match serde_json::from_str(&text) {
+                    Ok(val) => val,
+                    Err(_) => continue,
+                };
 
-        // Reader Task
-        tokio::spawn(async move {
-            while let Some(msg) = read.next().await {
-                match msg {
-                    Ok(Message::Text(text)) => {
-                        if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                            if v.get("result").is_some() {
-                                info!("Binance confirmed subscription.");
-                            }
-
-                            if let Some(event_type) = v.get("e").and_then(|e| e.as_str()) {
-                                match event_type {
-                                    "aggTrade" => {
-                                        match parse_trade(&v) {
-                                            Ok(trade) => {
-                                                // ENABLED LOG: Confirms data is valid inside Rust
-                                                info!("Parsed Trade: {} ${}", trade.symbol, trade.price);
-                                                let _ = data_pipe.send(MarketData::Trade(trade)).await;
-                                            }
-                                            Err(_) => warn!("Failed to parse trade: {}", text),
-                                        }
-                                    },
-                                    _ => {}
-                                }
-                            }
-                            if v.get("bids").is_some() && v.get("asks").is_some() {
-                                if let Ok(book) = parse_orderbook(&v) {
-                                    let _ = data_pipe.send(MarketData::OrderBook(book)).await;
-                                }
-                            }
-                        }
+                // 5. Route based on event type
+                if let Some(event_type) = v["e"].as_str() {
+                    match event_type {
+                        "depthUpdate" => handle_depth_update(&symbol, &v, &engine).await,
+                        "trade" => handle_trade(&symbol, &v, &engine).await,
+                        _ => {} // Ignore other events
                     }
-                    Ok(Message::Ping(_)) => {}
-                    Err(e) => error!("Binance WS Error: {}", e),
-                    _ => {}
+                } else {
+                    // Fallback for direct depth snapshots if not using @depthUpdate
+                    if !v["bids"].is_null() {
+                         handle_snapshot(&symbol, &v, &engine).await;
+                    }
                 }
             }
-        });
-
-        Ok(())
-    }
-
-    async fn subscribe(&self, symbol: &str, data_type: DataType) -> Result<(), String> {
-        let method = match data_type {
-            DataType::Trade => "aggTrade",
-            DataType::Depth5 => "depth5@100ms",
-        };
-        
-        let params = format!("{}@{}", symbol.to_lowercase(), method);
-        
-        let payload = serde_json::json!({
-            "method": "SUBSCRIBE",
-            "params": [params],
-            "id": 1
-        });
-
-        self.ws_tx.send(payload.to_string())
-            .map_err(|_| "Failed to send subscription to internal task".to_string())
+            _ => {} // Ignore non-text messages
+        }
     }
 }
 
-fn parse_trade(v: &Value) -> Result<Trade, ()> {
-    Ok(Trade {
-        symbol: v["s"].as_str().ok_or(())?.to_string(),
-        price: v["p"].as_str().ok_or(())?.parse().map_err(|_| ())?,
-        quantity: v["q"].as_str().ok_or(())?.parse().map_err(|_| ())?,
-        timestamp: v["T"].as_u64().ok_or(())?,
-    })
-}
+//
+// PARSING LOGIC
+//
 
-fn parse_orderbook(v: &Value) -> Result<OrderBook, ()> {
-    let parse_level = |arr: &Value| -> (f64, f64) {
-        let p = arr[0].as_str().unwrap_or("0").parse().unwrap_or(0.0);
-        let q = arr[1].as_str().unwrap_or("0").parse().unwrap_or(0.0);
-        (p, q)
+async fn handle_snapshot(symbol: &str, v: &Value, engine: &Engine) {
+    // 1. Parse bids
+    let bids: Vec<PriceLevel> = parse_levels(&v["bids"]);
+    
+    // 2. Parse asks
+    let asks: Vec<PriceLevel> = parse_levels(&v["asks"]);
+    
+    // 3. Create OrderBook struct
+    let book: OrderBook = OrderBook {
+        symbol: symbol.to_string(),
+        bids,
+        asks,
+        last_update_id: v["lastUpdateId"].as_u64().unwrap_or(0),
     };
 
-    let bids = v["bids"].as_array().unwrap_or(&vec![]).iter().map(parse_level).collect();
-    let asks = v["asks"].as_array().unwrap_or(&vec![]).iter().map(parse_level).collect();
-    let s = v["s"].as_str().unwrap_or("UNKNOWN").to_string(); 
+    // 4. Update Engine
+    engine.update_order_book(symbol.to_string(), book).await;
+}
 
-    Ok(OrderBook { symbol: s, bids, asks })
+async fn handle_depth_update(symbol: &str, v: &Value, engine: &Engine) {
+     // For this simplified implementation, we treat partial depth updates 
+     // similar to snapshots as we are using the @depth20 stream.
+     handle_snapshot(symbol, v, engine).await;
+}
+
+async fn handle_trade(symbol: &str, v: &Value, engine: &Engine) {
+    // 1. Extract fields
+    let price_str: &str = v["p"].as_str().unwrap_or("0.0");
+    let qty_str: &str = v["q"].as_str().unwrap_or("0.0");
+    
+    // 2. Construct Trade
+    let trade: Trade = Trade {
+        symbol: symbol.to_string(),
+        price: price_str.parse().unwrap_or(0.0),
+        quantity: qty_str.parse().unwrap_or(0.0),
+        time: v["T"].as_u64().unwrap_or(0),
+        is_buyer_maker: v["m"].as_bool().unwrap_or(false),
+    };
+
+    // 3. Update Engine
+    engine.add_trade(symbol.to_string(), trade).await;
+}
+
+fn parse_levels(items: &Value) -> Vec<PriceLevel> {
+    // 1. Initialize vector
+    let mut levels: Vec<PriceLevel> = Vec::new();
+    
+    // 2. Iterate and parse
+    if let Some(arr) = items.as_array() {
+        for item in arr {
+            let price_str: &str = item[0].as_str().unwrap_or("0");
+            let qty_str: &str = item[1].as_str().unwrap_or("0");
+            
+            levels.push(PriceLevel {
+                price: price_str.parse().unwrap_or(0.0),
+                quantity: qty_str.parse().unwrap_or(0.0),
+            });
+        }
+    }
+    
+    levels
 }

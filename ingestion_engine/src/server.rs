@@ -1,99 +1,98 @@
-// ingestion_engine/src/server.rs
-use tokio::net::TcpListener;
-use tokio::sync::mpsc::{UnboundedSender, Receiver, Sender};
-use tokio::sync::{mpsc, Mutex};
-use tokio_tungstenite::accept_async;
-use futures_util::{SinkExt, StreamExt};
+// @file: server.rs
+// @description: WebSocket server with broadcast capabilities.
+// @author: v5 helper
+
 use std::net::SocketAddr;
-use std::collections::HashMap;
-use std::sync::Arc;
+use tokio::net::{TcpListener, TcpStream};
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::accept_async;
+use tokio_tungstenite::tungstenite::Message;
+use crate::engine::Engine;
 use crate::models::{Command, MarketData};
-use log::{info, error};
 
-type PeerMap = Arc<Mutex<HashMap<SocketAddr, UnboundedSender<String>>>>;
+//
+// CONSTANTS
+//
 
-pub struct Server {
-    peers: PeerMap,
+const SERVER_ADDR: &str = "127.0.0.1:8080";
+
+//
+// SERVER ENTRY POINT
+//
+
+pub async fn start_server(engine: Engine) {
+    let addr: SocketAddr = SERVER_ADDR.parse().expect("Invalid address");
+    let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
+    
+    println!("WebSocket server listening on: {}", addr);
+
+    while let Ok((stream, _)) = listener.accept().await {
+        let engine_clone = engine.clone();
+        tokio::spawn(handle_connection(stream, engine_clone));
+    }
 }
 
-impl Server {
-    pub fn new() -> Self {
-        Self {
-            peers: PeerMap::new(Mutex::new(HashMap::new())),
+//
+// CONNECTION HANDLER
+//
+
+async fn handle_connection(stream: TcpStream, engine: Engine) {
+    let ws_stream = match accept_async(stream).await {
+        Ok(ws) => ws,
+        Err(e) => {
+            eprintln!("Handshake error: {}", e);
+            return;
         }
-    }
+    };
 
-    pub async fn run(
-        self, 
-        mut data_rx: Receiver<MarketData>, 
-        command_tx: Sender<Command>
-    ) {
-        let addr = "127.0.0.1:3000";
-        let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
-        info!("WebSocket Server running on: {}", addr);
+    println!("Client connected");
 
-        let peers = self.peers.clone();
+    let (mut write, mut read) = ws_stream.split();
+    
+    // 1. Subscribe to Engine Broadcasts
+    let mut rx = engine.tx.subscribe();
 
-        // TASK 1: Broadcast Data (Engine -> Frontend)
-        let broadcast_peers = peers.clone();
-        tokio::spawn(async move {
-            while let Some(data) = data_rx.recv().await {
-                let msg = serde_json::to_string(&data).unwrap_or_default();
-                let locked_peers = broadcast_peers.lock().await;
-                
-                // info!("Broadcasting data to {} clients", locked_peers.len()); // DEBUG: Very spammy, use only if needed
-                for peer in locked_peers.values() {
-                    let _ = peer.send(msg.clone());
+    // 2. Main Event Loop (Select between incoming Commands and outgoing Broadcasts)
+    loop {
+        tokio::select! {
+            // A. Handle Incoming WebSocket Messages (from Client)
+            msg_option = read.next() => {
+                match msg_option {
+                    Some(Ok(Message::Text(text))) => {
+                         // Optional: Handle commands like 'subscribe' here if you want to filter streams
+                         // For now, we just log it.
+                         if let Ok(cmd) = serde_json::from_str::<Command>(&text) {
+                            println!("Client command: {}", cmd.action);
+                             // Send initial snapshot on subscribe
+                             if cmd.action == "subscribe" {
+                                if let Some(book) = engine.get_order_book(&cmd.channel).await {
+                                     let response = MarketData::OrderBook(book);
+                                     let json = serde_json::to_string(&response).unwrap();
+                                     let _ = write.send(Message::Text(json)).await;
+                                }
+                             }
+                         }
+                    }
+                    Some(Ok(Message::Close(_))) => break,
+                    Some(Err(_)) => break,
+                    None => break,
+                    _ => {}
                 }
             }
-        });
 
-        // TASK 2: Accept New Connections
-        while let Ok((stream, addr)) = listener.accept().await {
-            let peers = peers.clone();
-            let cmd_tx = command_tx.clone();
-
-            tokio::spawn(async move {
-                info!("New connection: {}", addr);
-                let ws_stream = match accept_async(stream).await {
-                    Ok(ws) => ws,
-                    Err(e) => {
-                        error!("Error during websocket handshake: {}", e);
-                        return;
-                    }
-                };
-
-                let (mut ws_sender, mut ws_receiver) = ws_stream.split();
-                let (tx, mut rx) = mpsc::unbounded_channel();
-                peers.lock().await.insert(addr, tx);
-
-                let send_task = tokio::spawn(async move {
-                    while let Some(msg) = rx.recv().await {
-                        if ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(msg)).await.is_err() {
-                            break; 
+            // B. Handle Outgoing Engine Events (to Client)
+            event_result = rx.recv() => {
+                if let Ok(event) = event_result {
+                    // Serialize and send
+                    if let Ok(json) = serde_json::to_string(&event) {
+                        if write.send(Message::Text(json)).await.is_err() {
+                            break; // Client disconnected
                         }
-                    }
-                });
-
-                while let Some(msg) = ws_receiver.next().await {
-                    match msg {
-                        Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
-                            info!("Received from Frontend: {}", text); // DEBUG LOG
-                            if let Ok(cmd) = serde_json::from_str::<Command>(&text) {
-                                let _ = cmd_tx.send(cmd).await;
-                            } else {
-                                error!("Failed to parse frontend command: {}", text);
-                            }
-                        }
-                        Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => break,
-                        _ => {}
                     }
                 }
-
-                send_task.abort();
-                peers.lock().await.remove(&addr);
-                info!("Disconnected: {}", addr);
-            });
+            }
         }
     }
+    
+    println!("Client disconnected");
 }

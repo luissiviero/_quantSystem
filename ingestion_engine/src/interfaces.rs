@@ -1,13 +1,38 @@
-// ingestion_engine/src/interfaces.rs
+// @file: interfaces.rs
+// @description: Defines traits for data processing (if applicable).
+// @author: v5 helper
+
+use crate::models::MarketData;
 use async_trait::async_trait;
-use tokio::sync::mpsc;
-use crate::models::{DataType, MarketData};
+
+//
+// TRAIT DEFINITIONS
+//
+
+#[allow(dead_code)]
+#[async_trait]
+pub trait DataProcessor {
+    // 1. Process incoming market data
+    async fn process(&self, data: MarketData);
+    
+    // 2. Handle errors
+    fn on_error(&self, error: String);
+}
+
+//
+// MOCK IMPLEMENTATION (Example)
+//
+
+#[allow(dead_code)]
+pub struct LoggerProcessor;
 
 #[async_trait]
-pub trait MarketSource: Send + Sync {
-    // Start the internal loop. Pass the Data Pipe (sender) so the source can push data.
-    async fn start(&mut self, data_pipe: mpsc::Sender<MarketData>) -> Result<(), String>;
+impl DataProcessor for LoggerProcessor {
+    async fn process(&self, data: MarketData) {
+        println!("Processing data: {:?}", data);
+    }
 
-    // The Control Knob. The Engine calls this to tell the source what to watch.
-    async fn subscribe(&self, symbol: &str, data_type: DataType) -> Result<(), String>;
+    fn on_error(&self, error: String) {
+        eprintln!("Processor error: {}", error);
+    }
 }

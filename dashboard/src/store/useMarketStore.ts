@@ -1,114 +1,51 @@
-// dashboard/src/store/useMarketStore.ts
+// @file: useMarketStore.ts
+// @description: Global state management for market data.
+// @author: v5 helper
+
 import { create } from 'zustand';
-import { subscribeWithSelector } from 'zustand/middleware';
-import { DataType, OrderBook, Trade, WebSocketMessage } from '../models/types';
+import { OrderBook, Trade } from '../models/types';
+
+//
+// INTERFACES
+//
 
 interface MarketState {
-    // --- State ---
-    isConnected: boolean;
-    activeSymbol: string;
-    lastTrade: Trade | null;
-    tradeHistory: Trade[];
-    orderBook: OrderBook | null;
-
-    // --- Actions ---
-    connect: (url: string) => void;
-    subscribeToSymbol: (symbol: string, type: DataType) => void;
+  orderBook: OrderBook | null;
+  recentTrades: Trade[];
+  isConnected: boolean;
+  setOrderBook: (book: OrderBook) => void;
+  addTrade: (trade: Trade) => void;
+  setConnected: (status: boolean) => void;
 }
 
-export const useMarketStore = create<MarketState>()(
-    subscribeWithSelector((set, get) => {
-        let socket: WebSocket | null = null;
-        let reconnectTimeout: number | undefined;
+//
+// STORE IMPLEMENTATION
+//
 
-        const connectSocket = (url: string) => {
-            if (socket) {
-                // If socket exists and is open or connecting, do nothing
-                if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
-                    return;
-                }
-                // If it's closing or closed, ensure we clear it before creating a new one
-                socket.close();
-            }
+export const useMarketStore = create<MarketState>((set) => ({
+  // 1. Initial State
+  orderBook: null,
+  recentTrades: [],
+  isConnected: false,
 
-            console.log(`Connecting to ${url}...`);
-            socket = new WebSocket(url);
+  // 2. Actions
+  setOrderBook: (book: OrderBook) => set({ orderBook: book }),
+  
+  addTrade: (trade: Trade) => set((state: MarketState) => {
+    // 2a. Prepend new trade
+    const updatedTrades: Trade[] = [trade, ...state.recentTrades];
+    
+    // 2b. Limit array size
+    // FIX: Increased from 50 to 2500 to allow chart history to build up.
+    // The RecentTrades component will slice this array to avoid UI lag.
+    const MAX_TRADES: number = 2500;
+    
+    if (updatedTrades.length > MAX_TRADES) {
+        return { recentTrades: updatedTrades.slice(0, MAX_TRADES) };
+    }
+    
+    return { recentTrades: updatedTrades };
+  }),
 
-            socket.onopen = () => {
-                console.log("WebSocket Connected");
-                set({ isConnected: true });
-                // Clear any pending reconnect attempts
-                clearTimeout(reconnectTimeout);
-                
-                // Resubscribe to current symbol
-                const symbol = get().activeSymbol;
-                get().subscribeToSymbol(symbol, DataType.Trade);
-                get().subscribeToSymbol(symbol, DataType.Depth5);
-            };
-
-            socket.onclose = () => {
-                console.log("WebSocket Disconnected. Retrying in 3s...");
-                set({ isConnected: false });
-                socket = null;
-
-                // Auto-reconnect logic
-                reconnectTimeout = window.setTimeout(() => {
-                    connectSocket(url);
-                }, 3000);
-            };
-
-            socket.onerror = (err) => {
-                console.error("WebSocket Error:", err);
-                socket?.close(); // Trigger onclose
-            };
-
-            socket.onmessage = (event) => {
-                try {
-                    const payload: WebSocketMessage = JSON.parse(event.data);
-                    
-                    if (payload.type === 'Trade') {
-                        const trade = payload.data as Trade;
-                        set((state) => ({ 
-                            lastTrade: trade,
-                            tradeHistory: [trade, ...state.tradeHistory].slice(0, 50)
-                        }));
-                    } else if (payload.type === 'OrderBook') {
-                        set({ orderBook: payload.data as OrderBook });
-                    }
-                } catch (e) {
-                    console.error("Failed to parse WS message", e);
-                }
-            };
-        };
-
-        return {
-            isConnected: false,
-            activeSymbol: 'BTCUSDT',
-            lastTrade: null,
-            tradeHistory: [],
-            orderBook: null,
-
-            connect: (url: string) => {
-                connectSocket(url);
-            },
-
-            subscribeToSymbol: (symbol: string, type: DataType) => {
-                if (socket?.readyState === WebSocket.OPEN) {
-                    const payload = {
-                        action: "subscribe",
-                        symbol: symbol,
-                        dataType: type
-                    };
-                    socket.send(JSON.stringify(payload));
-                    // console.log("Sent subscription:", payload); // Optional logging
-                    
-                    if (get().activeSymbol !== symbol) {
-                         set({ activeSymbol: symbol, tradeHistory: [], orderBook: null });
-                    }
-                } else {
-                    // console.warn("Socket not open, cannot subscribe yet.");
-                }
-            }
-        };
-    })
-);
+  setConnected: (status: boolean) => set({ isConnected: status }),
+}));

@@ -1,54 +1,67 @@
-// dashboard/src/components/OrderBook.tsx
+// @file: OrderBook.tsx
+// @description: Displays the order book bids and asks visually.
+// @author: v5 helper
+
+import React from 'react';
 import { useMarketStore } from '../store/useMarketStore';
+import { PriceLevel } from '../models/types';
 
-const OrderBook = () => {
-    // Select only what we need to minimize re-renders
-    const orderBook = useMarketStore((state) => state.orderBook);
+//
+// COMPONENT LOGIC
+//
 
-    if (!orderBook) {
-        return (
-            <div className="h-full flex items-center justify-center text-gray-500 bg-gray-900 rounded-lg border border-gray-700">
-                Loading Book...
-            </div>
-        );
-    }
+const OrderBook: React.FC = () => {
+  // 1. Select data from store
+  const { orderBook } = useMarketStore();
 
-    // Take top 10 asks (lowest price) and reverse them so highest is top visually
-    const asks = orderBook.asks.slice(0, 15).reverse();
-    const bids = orderBook.bids.slice(0, 15);
-
+  if (!orderBook) {
     return (
-        <div className="flex flex-col h-[500px] bg-gray-900 rounded-lg border border-gray-700 overflow-hidden font-mono text-xs">
-            <div className="p-2 border-b border-gray-800 font-bold text-center text-gray-400">
-                Order Book
-            </div>
-            
-            <div className="flex-1 overflow-hidden flex flex-col">
-                {/* Asks (Sells) - Red */}
-                <div className="flex-1 flex flex-col justify-end pb-1">
-                    {asks.map(([price, qty], i) => (
-                        <div key={i} className="flex justify-between px-2 py-0.5 hover:bg-gray-800 cursor-pointer">
-                            <span className="text-red-400">{price.toFixed(2)}</span>
-                            <span className="text-gray-500">{qty.toFixed(4)}</span>
-                        </div>
-                    ))}
-                </div>
-
-                {/* Spread / Mid Market could go here */}
-                <div className="border-t border-b border-gray-700 h-1 my-1 bg-gray-800"></div>
-
-                {/* Bids (Buys) - Green */}
-                <div className="flex-1 pt-1">
-                    {bids.map(([price, qty], i) => (
-                        <div key={i} className="flex justify-between px-2 py-0.5 hover:bg-gray-800 cursor-pointer">
-                            <span className="text-green-400">{price.toFixed(2)}</span>
-                            <span className="text-gray-500">{qty.toFixed(4)}</span>
-                        </div>
-                    ))}
-                </div>
-            </div>
-        </div>
+      <div className="p-4 bg-gray-800 rounded-lg shadow-lg">
+        <h2 className="text-xl font-bold mb-4 text-white">Order Book</h2>
+        <p className="text-gray-400">Waiting for data...</p>
+      </div>
     );
+  }
+
+  // 2. Render helper for rows
+  const renderRow = (level: PriceLevel, type: 'bid' | 'ask', index: number) => {
+    // Explicit typing for styles
+    const textColor: string = type === 'bid' ? 'text-green-400' : 'text-red-400';
+    
+    return (
+      <div key={`${type}-${index}`} className="flex justify-between text-sm py-1 border-b border-gray-700 last:border-0">
+        <span className={`${textColor} font-mono`}>{level.price.toFixed(2)}</span>
+        <span className="text-gray-300 font-mono">{level.quantity.toFixed(5)}</span>
+      </div>
+    );
+  };
+
+  // 3. Main Render
+  return (
+    <div className="p-4 bg-gray-800 rounded-lg shadow-lg border border-gray-700 h-full">
+      <h2 className="text-xl font-bold mb-4 text-white border-b border-gray-600 pb-2">
+        Order Book <span className="text-sm text-gray-500">({orderBook.symbol})</span>
+      </h2>
+      
+      <div className="grid grid-cols-2 gap-4">
+        {/* BIDS COLUMN */}
+        <div>
+          <h3 className="text-green-500 font-semibold mb-2 text-center">Bids</h3>
+          <div className="space-y-0.5">
+            {orderBook.bids.slice(0, 10).map((level: PriceLevel, i: number) => renderRow(level, 'bid', i))}
+          </div>
+        </div>
+
+        {/* ASKS COLUMN */}
+        <div>
+          <h3 className="text-red-500 font-semibold mb-2 text-center">Asks</h3>
+          <div className="space-y-0.5">
+            {orderBook.asks.slice(0, 10).map((level: PriceLevel, i: number) => renderRow(level, 'ask', i))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 };
 
 export default OrderBook;
