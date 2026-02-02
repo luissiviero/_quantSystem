@@ -1,6 +1,6 @@
 // @file: src/PriceChart.tsx
 // @description: Multi-mode Chart (Ticks & Candles) using Lightweight Charts v5.
-// Refactored to prevent 'removeSeries' crash by recreating chart on mode change.
+// This component provides high-performance rendering for financial time-series data.
 
 import React, { useEffect, useRef } from 'react';
 import { 
@@ -29,10 +29,10 @@ export interface CandleData {
 }
 
 interface PriceChartProps {
-  data: number | CandleData | null;
+  data: number | CandleData | null; // Can be a single price or a full candle
   mode: ChartMode;
   symbol: string;
-  timeframe?: string;
+  timeframe?: string; // Optional: To display the active timeframe in header
 }
 
 // #
@@ -41,17 +41,18 @@ interface PriceChartProps {
 
 export const PriceChart: React.FC<PriceChartProps> = ({ data, mode, symbol, timeframe }) => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
-  
-  // We use refs to hold instances, but we won't try to reuse the chart across modes
-  // to avoid the 'removeSeries' crash. We just recreate it.
   const chartRef = useRef<IChartApi | null>(null);
+  
+  // Ref to hold the active series instance
   const seriesRef = useRef<ISeriesApi<"Area" | "Candlestick"> | null>(null);
 
   // #1. Initialize & Manage Chart Lifecycle
+  // We recreate the chart on mode/timeframe/symbol changes to ensure 
+  // the coordinate systems and data types remain consistent.
   useEffect(() => {
     if (!chartContainerRef.current) return;
 
-    // 1. Create Chart Instance
+    // Create Chart Instance
     const chart = createChart(chartContainerRef.current, {
       layout: {
         background: { type: ColorType.Solid, color: 'transparent' },
@@ -66,14 +67,14 @@ export const PriceChart: React.FC<PriceChartProps> = ({ data, mode, symbol, time
       timeScale: {
         timeVisible: true,
         secondsVisible: true,
+        shiftVisibleRangeOnNewBar: true,
       },
     });
 
     chartRef.current = chart;
 
-    // 2. Create Series based on current Mode immediately
+    // Create Initial Series based on current Mode
     let series: ISeriesApi<"Area" | "Candlestick">;
-
     if (mode === 'tick') {
       series = chart.addSeries(AreaSeries, {
         lineColor: '#10b981',
@@ -90,34 +91,33 @@ export const PriceChart: React.FC<PriceChartProps> = ({ data, mode, symbol, time
         wickDownColor: '#ef4444',
       });
     }
-    
     seriesRef.current = series;
 
-    // 3. Resize Handler
+    // Handle Window Resizing
     const handleResize = () => {
-      if (chartContainerRef.current) {
-        chart.applyOptions({ width: chartContainerRef.current.clientWidth });
+      if (chartContainerRef.current && chartRef.current) {
+        chartRef.current.applyOptions({ width: chartContainerRef.current.clientWidth });
       }
     };
     window.addEventListener('resize', handleResize);
 
-    // 4. Cleanup
+    // Component Cleanup
     return () => {
       window.removeEventListener('resize', handleResize);
-      chart.remove(); // Destroys chart and all series safely
-      chartRef.current = null;
-      seriesRef.current = null;
+      if (chartRef.current) {
+        chartRef.current.remove();
+        chartRef.current = null;
+        seriesRef.current = null;
+      }
     };
-  }, [mode]); // Re-run everything if Mode changes
+  }, [mode, timeframe, symbol]);
 
-  // #2. Data Update Logic
-  // This runs whenever 'data' changes, using the EXISTING chart instance
+  // #2. Real-time Data Update Logic
   useEffect(() => {
     if (!data || !seriesRef.current) return;
 
     try {
       if (mode === 'tick' && typeof data === 'number') {
-        // Force type cast because we know it matches the mode
         const s = seriesRef.current as ISeriesApi<"Area">;
         s.update({
           time: (Date.now() / 1000) as Time,
@@ -126,24 +126,31 @@ export const PriceChart: React.FC<PriceChartProps> = ({ data, mode, symbol, time
       } else if (mode === 'candle' && typeof data === 'object') {
         const s = seriesRef.current as ISeriesApi<"Candlestick">;
         const c = data as CandleData;
-        s.update({
-          time: c.time as Time,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-        } as CandlestickData<Time>);
+        
+        // Ensure data is valid before updating the chart
+        if (c.time && !isNaN(c.open)) {
+          s.update({
+            time: c.time as Time,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+          } as CandlestickData<Time>);
+        }
       }
     } catch (err) {
-      console.warn("Chart update failed:", err);
+      // Catching timestamp or sequence errors from the data feed
+      console.warn("Chart series update failed:", err);
     }
-  }, [data, mode]); // Depend on data and mode
+  }, [data, mode]);
 
   return (
-    <div className="w-full bg-[#161a25] border border-[#2b3139] rounded-xl p-0 relative group">
-      {/* Header Overlay */}
-      <div className="absolute top-2 left-2 z-10 text-xs font-bold text-[#848e9c] uppercase tracking-wider bg-[#161a25]/80 px-2 py-1 rounded backdrop-blur-sm">
-        {symbol} {mode === 'tick' ? 'Ticks' : `Candles ${timeframe ? `(${timeframe})` : ''}`}
+    <div className="w-full h-full bg-[#161a25] relative group overflow-hidden">
+      {/* Chart Header Information Overlay */}
+      <div className="absolute top-2 left-2 z-10 pointer-events-none">
+        <div className="text-[10px] font-bold text-[#848e9c] uppercase tracking-wider bg-[#161a25]/90 px-2 py-1 rounded border border-[#2b3139] shadow-lg">
+          {symbol} {mode === 'tick' ? 'Ticks' : `Candles (${timeframe || '1m'})`}
+        </div>
       </div>
       <div ref={chartContainerRef} className="w-full h-full" />
     </div>
