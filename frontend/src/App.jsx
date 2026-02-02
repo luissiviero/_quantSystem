@@ -3,6 +3,9 @@ import React from 'react';
 import { Layout, Model } from 'flexlayout-react';
 import 'flexlayout-react/style/dark.css'; 
 
+// Import Provider
+import { WebSocketProvider } from './context/WebSocketContext';
+
 // Import Components
 import Header from './components/Header';
 import { ChartComponent } from './components/ChartComponent';
@@ -26,13 +29,11 @@ function App() {
   const factory = (node) => {
     const component = node.getComponent();
     
-    // Wire up the new optimized components
     if (component === 'chart') return <ChartComponent />;
     if (component === 'orderBook') return <OrderBook />;
     if (component === 'orderForm') return <OrderForm />;
     if (component === 'trades') return <TradesComponent />;
     
-    // Placeholder for empty tabs
     if (component === 'positions' || component === 'history' || component === 'assets') {
       return (
         <div className="panel-content" style={{alignItems: 'center', justifyContent: 'center', color: '#474d57', fontSize: '12px'}}>
@@ -45,13 +46,15 @@ function App() {
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', width: '100vw' }}>
-      <Header />
-      <div style={{ flex: 1, position: 'relative' }}>
-        <Layout model={model} factory={factory} />
+    <WebSocketProvider>
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', width: '100vw' }}>
+        <Header />
+        <div style={{ flex: 1, position: 'relative' }}>
+          <Layout model={model} factory={factory} />
+        </div>
+        <Footer />
       </div>
-      <Footer />
-    </div>
+    </WebSocketProvider>
   );
 }
 

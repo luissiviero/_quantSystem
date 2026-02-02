@@ -1,0 +1,31 @@
+# --- Python Basics ---
+__pycache__/
+*.py[cod]
+*.so
+
+# --- Virtual Environments ---
+# Matches venv, env, .venv, etc.
+venv/
+env/
+.venv/
+
+# --- Data Science & Notebooks ---
+.ipynb_checkpoints/
+# Exclude heavy datasets if you download them here
+*.csv
+*.xlsx
+*.parquet
+
+# --- Security ---
+.env
+
+# --- Google Drive & Windows Junk ---
+# Google Drive often creates these temporary conflict/download files
+*.tmp
+*.tmp.drivedownload
+desktop.ini
+Icon?
+
+# --- Office/Editor Temp Files (common in Drive) ---
+~$*
+*.swp

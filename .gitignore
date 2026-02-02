@@ -1,0 +1,8 @@
+# --- GLOBAL SECURITY ---
+.env
+.DS_Store
+Thumbs.db
+
+# --- IDE SETTINGS ---
+.vscode/
+.idea/

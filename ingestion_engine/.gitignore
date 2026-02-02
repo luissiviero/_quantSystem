@@ -1,0 +1,18 @@
+# --- Rust Build Artifacts (CRITICAL) ---
+# This folder gets huge (GBs). Never commit it.
+/target/
+
+# --- Security ---
+# Never commit your API keys
+.env
+.env.local
+
+# --- IDE & Editor Settings ---
+.vscode/
+.idea/
+*.swp
+
+# --- OS Junk ---
+.DS_Store
+Thumbs.db
+desktop.ini
