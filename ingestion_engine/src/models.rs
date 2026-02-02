@@ -1,123 +1,47 @@
-// @file: src/models.rs
-// @description: Defines the data structures for all Binance Futures streams.
-
+// ingestion_engine/src/models.rs
 use serde::{Deserialize, Serialize};
 
-// #
-// # COMPOSITE SNAPSHOT (New)
-// #
-// This will be the "State" we send to the frontend every 200ms.
-#[derive(Serialize, Debug, Clone, Default)]
-pub struct GlobalSnapshot {
-    pub ticker: Option<BookTicker>,
-    pub mark_price: Option<MarkPrice>,
-    // We send only the *latest* trade/kline in the snapshot, 
-    // or we could accumulate them. For simplicity, just the latest.
-    pub last_trade: Option<AggTrade>,
-    pub last_kline: Option<KlineEvent>,
-    pub last_liquidation: Option<ForceOrder>,
+// --- DATA FLOW (Output) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum MarketData {
+    Trade(Trade),
+    OrderBook(OrderBook),
 }
 
-// #
-// # WRAPPER FOR MULTI-STREAM
-// #
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct CombinedEvent {
-    pub stream: String,
-    pub data: serde_json::Value, 
-}
-
-// #
-// # 1. BOOK TICKER
-// #
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct BookTicker {
-    #[serde(rename = "s")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Trade {
     pub symbol: String,
-    #[serde(rename = "b")]
-    pub best_bid: String,
-    #[serde(rename = "B")]
-    pub bid_qty: String,
-    #[serde(rename = "a")]
-    pub best_ask: String,
-    #[serde(rename = "A")]
-    pub ask_qty: String,
+    pub price: f64,
+    pub quantity: f64,
+    pub timestamp: u64,
 }
 
-// #
-// # 2. AGGREGATE TRADE
-// #
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct AggTrade {
-    #[serde(rename = "s")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderBook {
     pub symbol: String,
-    #[serde(rename = "p")]
-    pub price: String,
-    #[serde(rename = "q")]
-    pub quantity: String,
-    #[serde(rename = "m")]
-    pub is_buyer_maker: bool, 
+    pub bids: Vec<(f64, f64)>, // Price, Qty
+    pub asks: Vec<(f64, f64)>,
 }
 
-// #
-// # 3. LIQUIDATION ORDER
-// #
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct ForceOrder {
-    #[serde(rename = "o")]
-    pub order_data: ForceOrderData,
+// --- CONTROL FLOW (Input) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+// FIX: Removed rename_all="camelCase" because frontend sends "Trade" (PascalCase)
+// If we kept camelCase, Rust would expect "trade".
+pub enum DataType {
+    Trade,
+    Depth5,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct ForceOrderData {
-    #[serde(rename = "s")]
-    pub symbol: String,
-    #[serde(rename = "S")]
-    pub side: String, 
-    #[serde(rename = "q")]
-    pub original_quantity: String,
-    #[serde(rename = "p")]
-    pub price: String,
-}
-
-// #
-// # 4. MARK PRICE
-// #
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct MarkPrice {
-    #[serde(rename = "s")]
-    pub symbol: String,
-    #[serde(rename = "p")]
-    pub price: String,
-    #[serde(rename = "r")]
-    pub funding_rate: String,
-    #[serde(rename = "T")]
-    pub next_funding_time: i64,
-}
-
-// #
-// # 5. KLINE / CANDLESTICK
-// #
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct KlineEvent {
-    #[serde(rename = "k")]
-    pub kline: KlineData,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct KlineData {
-    #[serde(rename = "t")]
-    pub start_time: i64,
-    #[serde(rename = "o")]
-    pub open: String,
-    #[serde(rename = "c")]
-    pub close: String,
-    #[serde(rename = "h")]
-    pub high: String,
-    #[serde(rename = "l")]
-    pub low: String,
-    #[serde(rename = "v")]
-    pub volume: String,
-    #[serde(rename = "x")]
-    pub is_closed: bool,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action")]
+pub enum Command {
+    #[serde(rename = "subscribe")]
+    Subscribe {
+        symbol: String,
+        #[serde(rename = "dataType")]
+        data_type: DataType,
+    },
 }

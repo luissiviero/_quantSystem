@@ -1,72 +1,99 @@
-// @file: src/server.rs
-// @description: Manages the local TCP/WebSocket server and broadcasts snapshots.
-
+// ingestion_engine/src/server.rs
+use tokio::net::TcpListener;
+use tokio::sync::mpsc::{UnboundedSender, Receiver, Sender};
+use tokio::sync::{mpsc, Mutex};
+use tokio_tungstenite::accept_async;
+use futures_util::{SinkExt, StreamExt};
+use std::net::SocketAddr;
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, RwLock};
-use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
-use futures_util::SinkExt;
-use crate::models::GlobalSnapshot;
+use crate::models::{Command, MarketData};
+use log::{info, error};
 
-// #
-// # BROADCAST LOOP (The Throttler)
-// #
-pub async fn broadcast_snapshot_loop(
-    shared_state: Arc<RwLock<GlobalSnapshot>>,
-    tx: broadcast::Sender<String>
-) {
-    // Tick every 200ms (5 times a second)
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(200));
+type PeerMap = Arc<Mutex<HashMap<SocketAddr, UnboundedSender<String>>>>;
 
-    loop {
-        interval.tick().await;
-
-        // Serialize the entire state to JSON
-        let snapshot_json = {
-            let lock = shared_state.read().await;
-            serde_json::to_string(&*lock).unwrap_or_default()
-        };
-
-        // Broadcast to Frontend
-        let _ = tx.send(snapshot_json);
-    }
+pub struct Server {
+    peers: PeerMap,
 }
 
-// #
-// # SERVER LISTENER
-// #
-pub async fn start_server(tx: broadcast::Sender<String>) {
-    let addr = "127.0.0.1:8080";
-    let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
-    
-    println!("Local Server listening on: {}", addr);
-
-    loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                let rx = tx.subscribe();
-                tokio::spawn(handle_client(stream, rx));
-            }
-            Err(e) => eprintln!("Client Connection Error: {}", e),
+impl Server {
+    pub fn new() -> Self {
+        Self {
+            peers: PeerMap::new(Mutex::new(HashMap::new())),
         }
     }
-}
 
-async fn handle_client(stream: TcpStream, mut rx: broadcast::Receiver<String>) {
-    let mut ws_stream = match accept_async(stream).await {
-        Ok(s) => s,
-        Err(_) => return,
-    };
+    pub async fn run(
+        self, 
+        mut data_rx: Receiver<MarketData>, 
+        command_tx: Sender<Command>
+    ) {
+        let addr = "127.0.0.1:3000";
+        let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
+        info!("WebSocket Server running on: {}", addr);
 
-    loop {
-        match rx.recv().await {
-            Ok(msg) => {
-                let message = Message::Text(msg.into());
-                if ws_stream.send(message).await.is_err() {
-                    break; 
+        let peers = self.peers.clone();
+
+        // TASK 1: Broadcast Data (Engine -> Frontend)
+        let broadcast_peers = peers.clone();
+        tokio::spawn(async move {
+            while let Some(data) = data_rx.recv().await {
+                let msg = serde_json::to_string(&data).unwrap_or_default();
+                let locked_peers = broadcast_peers.lock().await;
+                
+                // info!("Broadcasting data to {} clients", locked_peers.len()); // DEBUG: Very spammy, use only if needed
+                for peer in locked_peers.values() {
+                    let _ = peer.send(msg.clone());
                 }
             }
-            Err(_) => break,
+        });
+
+        // TASK 2: Accept New Connections
+        while let Ok((stream, addr)) = listener.accept().await {
+            let peers = peers.clone();
+            let cmd_tx = command_tx.clone();
+
+            tokio::spawn(async move {
+                info!("New connection: {}", addr);
+                let ws_stream = match accept_async(stream).await {
+                    Ok(ws) => ws,
+                    Err(e) => {
+                        error!("Error during websocket handshake: {}", e);
+                        return;
+                    }
+                };
+
+                let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                peers.lock().await.insert(addr, tx);
+
+                let send_task = tokio::spawn(async move {
+                    while let Some(msg) = rx.recv().await {
+                        if ws_sender.send(tokio_tungstenite::tungstenite::Message::Text(msg)).await.is_err() {
+                            break; 
+                        }
+                    }
+                });
+
+                while let Some(msg) = ws_receiver.next().await {
+                    match msg {
+                        Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
+                            info!("Received from Frontend: {}", text); // DEBUG LOG
+                            if let Ok(cmd) = serde_json::from_str::<Command>(&text) {
+                                let _ = cmd_tx.send(cmd).await;
+                            } else {
+                                error!("Failed to parse frontend command: {}", text);
+                            }
+                        }
+                        Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => break,
+                        _ => {}
+                    }
+                }
+
+                send_task.abort();
+                peers.lock().await.remove(&addr);
+                info!("Disconnected: {}", addr);
+            });
         }
     }
 }

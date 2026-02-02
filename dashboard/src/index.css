@@ -1,11 +1,9 @@
-/* src/index.css */
+/* dashboard/src/index.css */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* Optional: Smooth background for the whole app */
 body {
-  background-color: #020617; /* matches slate-950 */
-  margin: 0;
-  padding: 0;
+    background-color: #000;
+    color: white;
 }
