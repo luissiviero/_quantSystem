@@ -1,8 +1,10 @@
 // @file: models.rs
-// @description: Centralized data structures for the ingestion engine.
+// @description: Centralized data structures for the ingestion engine using Arc and strict types.
 // @author: v5 helper
+// ingestion_engine/src/models.rs
 
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 //
 // ORDER BOOK STRUCTURES
@@ -11,8 +13,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderBook {
     pub symbol: String,
-    pub bids: Vec<PriceLevel>,
-    pub asks: Vec<PriceLevel>,
+    // Using Arc to allow O(1) cloning across threads
+    pub bids: Arc<Vec<PriceLevel>>,
+    pub asks: Arc<Vec<PriceLevel>>,
     pub last_update_id: u64,
 }
 
@@ -26,13 +29,20 @@ pub struct PriceLevel {
 // TRADE STRUCTURES
 //
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum TradeSide {
+    Buy,  // Taker was a Buyer (Price UP)
+    Sell, // Taker was a Seller (Price DOWN)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trade {
+    pub id: u64,              // Unique Trade ID for deduplication
     pub symbol: String,
     pub price: f64,
     pub quantity: f64,
-    pub time: u64,
-    pub is_buyer_maker: bool,
+    pub timestamp_ms: u64,    // Explicit timestamp naming
+    pub side: TradeSide,      // Replaces boolean
 }
 
 //
@@ -47,8 +57,15 @@ pub enum MarketData {
     Trade(Trade),
 }
 
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")] // Automatically handles "subscribe" <-> Subscribe
+pub enum CommandAction {
+    Subscribe,
+    Unsubscribe,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Command {
-    pub action: String, // e.g., "subscribe"
-    pub channel: String, // e.g., "BTCUSDT"
+    pub action: CommandAction,
+    pub channel: String,
 }

@@ -1,128 +1,161 @@
 // @file: binance.rs
-// @description: Handles WebSocket connections and parsing for Binance.
+// @description: Handles WebSocket connections for Binance with exponential backoff reconnection logic.
 // @author: v5 helper
+// ingestion_engine/src/exchanges/binance.rs
 
-use futures_util::StreamExt; // Fixed: Removed SinkExt warning
+use futures_util::StreamExt;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use serde_json::Value;
+use serde::{Deserialize};
 use crate::engine::Engine;
-use crate::models::{OrderBook, PriceLevel, Trade};
+use crate::models::{OrderBook, PriceLevel, Trade, TradeSide};
 use url::Url;
+use std::sync::Arc;
+use tokio::time::{sleep, Duration};
+
 
 //
 // CONSTANTS
 //
 
+
 const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/ws";
+const MAX_BACKOFF_SECONDS: u64 = 60;
+
+
+//
+// BINANCE-SPECIFIC WIRE MODELS
+//
+
+
+#[derive(Deserialize)]
+struct BinanceTradeEvent {
+    #[serde(rename = "t")]
+    id: u64,
+    #[serde(rename = "s")]
+    symbol: String,
+    #[serde(rename = "p")]
+    price: String,
+    #[serde(rename = "q")]
+    quantity: String,
+    #[serde(rename = "T")]
+    timestamp: u64,
+    #[serde(rename = "m")]
+    is_buyer_maker: bool,
+}
+
+
+#[derive(Deserialize)]
+struct BinanceDepthEvent {
+    #[serde(rename = "lastUpdateId")]
+    last_update_id: u64,
+    bids: Vec<[String; 2]>,
+    asks: Vec<[String; 2]>,
+}
+
 
 //
 // CONNECTION LOGIC
 //
 
+
 pub async fn connect_binance(symbol: String, engine: Engine) {
-    // 1. Format the stream URL (lowercase symbol required by Binance)
-    let stream_name: String = format!("{}@depth20/{}@trade", symbol.to_lowercase(), symbol.to_lowercase());
-    let url_str: String = format!("{}/{}", BINANCE_WS_URL, stream_name);
-    let url: Url = Url::parse(&url_str).expect("Bad URL");
+    let mut backoff_seconds: u64 = 1;
 
-    println!("Connecting to Binance: {}", url);
+    // #1. Start infinite reconnection loop
+    loop {
+        let stream_name: String = format!("{}@depth20/{}@trade", symbol.to_lowercase(), symbol.to_lowercase());
+        let url_str: String = format!("{}/{}", BINANCE_WS_URL, stream_name);
+        let url: Url = Url::parse(&url_str).expect("Bad URL structure");
 
-    // 2. Establish WebSocket connection
-    let (ws_stream, _) = connect_async(url).await.expect("Failed to connect");
-    let (_, mut read) = ws_stream.split();
+        println!("Connecting to Binance: {}", url);
 
-    // 3. Process incoming messages
-    while let Some(msg) = read.next().await {
-        match msg {
-            Ok(Message::Text(text)) => {
-                // 4. Parse JSON
-                let v: Value = match serde_json::from_str(&text) {
-                    Ok(val) => val,
-                    Err(_) => continue,
-                };
+        // #2. Attempt to establish WebSocket connection
+        match connect_async(url).await {
+            Ok((ws_stream, _)) => {
+                println!("Successfully connected to Binance for {}", symbol);
+                backoff_seconds = 1;
 
-                // 5. Route based on event type
-                if let Some(event_type) = v["e"].as_str() {
-                    match event_type {
-                        "depthUpdate" => handle_depth_update(&symbol, &v, &engine).await,
-                        "trade" => handle_trade(&symbol, &v, &engine).await,
-                        _ => {} // Ignore other events
-                    }
-                } else {
-                    // Fallback for direct depth snapshots if not using @depthUpdate
-                    if !v["bids"].is_null() {
-                         handle_snapshot(&symbol, &v, &engine).await;
+                let (_, mut read) = ws_stream.split();
+
+                // #3. Process incoming messages
+                while let Some(msg) = read.next().await {
+                    match msg {
+                        Ok(Message::Text(text)) => {
+                            if let Err(e) = handle_message(&symbol, &text, &engine).await {
+                                eprintln!("Error handling message: {}", e);
+                            }
+                        }
+                        Ok(Message::Close(frame)) => {
+                            eprintln!("Binance closed connection: {:?}", frame);
+                            break;
+                        }
+                        Err(e) => {
+                            eprintln!("Websocket error: {}", e);
+                            break; 
+                        }
+                        _ => {} 
                     }
                 }
             }
-            _ => {} // Ignore non-text messages
+            Err(e) => {
+                eprintln!("Failed to connect to Binance: {}. Retrying in {}s...", e, backoff_seconds);
+            }
         }
+
+        // #4. Exponential Backoff Logic
+        sleep(Duration::from_secs(backoff_seconds)).await;
+        backoff_seconds = std::cmp::min(backoff_seconds * 2, MAX_BACKOFF_SECONDS);
     }
 }
 
+
 //
-// PARSING LOGIC
+// MESSAGE ROUTING & PARSING
 //
 
-async fn handle_snapshot(symbol: &str, v: &Value, engine: &Engine) {
-    // 1. Parse bids
-    let bids: Vec<PriceLevel> = parse_levels(&v["bids"]);
-    
-    // 2. Parse asks
-    let asks: Vec<PriceLevel> = parse_levels(&v["asks"]);
-    
-    // 3. Create OrderBook struct
-    let book: OrderBook = OrderBook {
-        symbol: symbol.to_string(),
-        bids,
-        asks,
-        last_update_id: v["lastUpdateId"].as_u64().unwrap_or(0),
-    };
 
-    // 4. Update Engine
-    engine.update_order_book(symbol.to_string(), book).await;
-}
+async fn handle_message(symbol: &str, text: &str, engine: &Engine) -> Result<(), serde_json::Error> {
+    // #1. Fast-path check for event type to avoid full generic parse
+    if text.contains("\"e\":\"trade\"") {
+        let ev: BinanceTradeEvent = serde_json::from_str(text)?;
+        
+        // #2. Convert to internal Trade model
+        let trade: Trade = Trade {
+            id: ev.id,
+            symbol: ev.symbol,
+            price: ev.price.parse::<f64>().unwrap_or(0.0),
+            quantity: ev.quantity.parse::<f64>().unwrap_or(0.0),
+            timestamp_ms: ev.timestamp,
+            side: if ev.is_buyer_maker { TradeSide::Sell } else { TradeSide::Buy },
+        };
 
-async fn handle_depth_update(symbol: &str, v: &Value, engine: &Engine) {
-     // For this simplified implementation, we treat partial depth updates 
-     // similar to snapshots as we are using the @depth20 stream.
-     handle_snapshot(symbol, v, engine).await;
-}
+        engine.add_trade(symbol.to_string(), trade).await;
+    } else if text.contains("\"bids\"") {
+        let ev: BinanceDepthEvent = serde_json::from_str(text)?;
+        
+        // #3. Efficient level parsing
+        let bids: Vec<PriceLevel> = parse_raw_levels(&ev.bids);
+        let asks: Vec<PriceLevel> = parse_raw_levels(&ev.asks);
 
-async fn handle_trade(symbol: &str, v: &Value, engine: &Engine) {
-    // 1. Extract fields
-    let price_str: &str = v["p"].as_str().unwrap_or("0.0");
-    let qty_str: &str = v["q"].as_str().unwrap_or("0.0");
-    
-    // 2. Construct Trade
-    let trade: Trade = Trade {
-        symbol: symbol.to_string(),
-        price: price_str.parse().unwrap_or(0.0),
-        quantity: qty_str.parse().unwrap_or(0.0),
-        time: v["T"].as_u64().unwrap_or(0),
-        is_buyer_maker: v["m"].as_bool().unwrap_or(false),
-    };
+        let book: OrderBook = OrderBook {
+            symbol: symbol.to_string(),
+            bids: Arc::new(bids),
+            asks: Arc::new(asks),
+            last_update_id: ev.last_update_id,
+        };
 
-    // 3. Update Engine
-    engine.add_trade(symbol.to_string(), trade).await;
-}
-
-fn parse_levels(items: &Value) -> Vec<PriceLevel> {
-    // 1. Initialize vector
-    let mut levels: Vec<PriceLevel> = Vec::new();
-    
-    // 2. Iterate and parse
-    if let Some(arr) = items.as_array() {
-        for item in arr {
-            let price_str: &str = item[0].as_str().unwrap_or("0");
-            let qty_str: &str = item[1].as_str().unwrap_or("0");
-            
-            levels.push(PriceLevel {
-                price: price_str.parse().unwrap_or(0.0),
-                quantity: qty_str.parse().unwrap_or(0.0),
-            });
-        }
+        engine.update_order_book(symbol.to_string(), book).await;
     }
-    
-    levels
+
+    Ok(())
+}
+
+
+fn parse_raw_levels(raw: &[[String; 2]]) -> Vec<PriceLevel> {
+    raw.iter()
+        .map(|item| PriceLevel {
+            price: item[0].parse::<f64>().unwrap_or(0.0),
+            quantity: item[1].parse::<f64>().unwrap_or(0.0),
+        })
+        .collect()
 }

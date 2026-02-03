@@ -38,7 +38,7 @@ export const useMarketStore = create<MarketState>((set) => ({
     // 2b. Limit array size
     // FIX: Increased from 50 to 2500 to allow chart history to build up.
     // The RecentTrades component will slice this array to avoid UI lag.
-    const MAX_TRADES: number = 2500;
+    const MAX_TRADES: number = 10000;
     
     if (updatedTrades.length > MAX_TRADES) {
         return { recentTrades: updatedTrades.slice(0, MAX_TRADES) };
