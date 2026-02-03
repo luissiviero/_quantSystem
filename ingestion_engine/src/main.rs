@@ -10,8 +10,11 @@ mod server;
 mod interfaces;
 
 use crate::engine::Engine;
-use crate::interfaces::LoggerProcessor; // Import specific plugins here
+use crate::interfaces::LoggerProcessor;
 use tokio::task;
+
+// test mod
+mod engine_bench;
 
 //
 // MAIN EXECUTION

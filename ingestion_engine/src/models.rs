@@ -49,9 +49,8 @@ pub struct Trade {
 // NETWORKING & COMMANDS
 //
 
-// FIX: Added Clone trait derived here to satisfy broadcast channel requirements
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
+#[serde(tag = "type")]
 pub enum MarketData {
     OrderBook(OrderBook),
     Trade(Trade),
