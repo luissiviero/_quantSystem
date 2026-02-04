@@ -45,3 +45,9 @@
         1. Create strategy.rs.
         2. Implement DataProcessor for your struct.
         3. In main.rs: add engine.register_processor(Box::new(MyStrategy)).await;.
+
+# main.rs
+>1.
+    'tokio::spawn' vs 'pinned threads'
+        >> 'tokio::spawn' for lots of symbols (50+)
+        >> 'pinned threads' for specific symbols (a few, I'm not sure how many)

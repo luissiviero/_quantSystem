@@ -7,7 +7,7 @@ import { useMarketStore } from './store/useMarketStore';
 import OrderBook from './components/OrderBook';
 import RecentTrades from './components/RecentTrades';
 import PriceChart from './components/PriceChart';
-import { MarketData } from './models/types';
+import { MarketData, DataType, Command } from './models/types';
 
 //
 // CONSTANTS
@@ -21,15 +21,21 @@ const RECONNECT_DELAY_MS: number = 3000;
 //
 
 const App: React.FC = () => {
-  const { setOrderBook, addTrade, setConnected, isConnected } = useMarketStore();
+  // #1. Destructure new actions for Candles and History
+  const { 
+      setOrderBook, 
+      addTrade, 
+      addCandle, 
+      prependHistory,
+      setConnected, 
+      isConnected 
+  } = useMarketStore();
   
-  // Use a ref to track the socket instance and prevent duplicates
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
 
   // 1. Define Connection Logic
   const connect = useCallback(() => {
-    // Prevent multiple connections
     if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
         return;
     }
@@ -41,7 +47,6 @@ const App: React.FC = () => {
     ws.onopen = () => {
       console.log('✅ Connected to Ingestion Engine');
       setConnected(true);
-      // Clear any pending reconnection timers
       if (reconnectTimeoutRef.current) {
           clearTimeout(reconnectTimeoutRef.current);
           reconnectTimeoutRef.current = null;
@@ -55,41 +60,66 @@ const App: React.FC = () => {
       console.log('❌ Disconnected. Retrying in 3s...');
       setConnected(false);
       wsRef.current = null;
-      
-      // Trigger reconnection
       reconnectTimeoutRef.current = setTimeout(() => {
           connect();
       }, RECONNECT_DELAY_MS);
     };
 
-    ws.onerror = () => {
-      // Error usually precedes onclose, so we let onclose handle the retry
-    };
+    ws.onerror = () => { };
 
     ws.onmessage = (event: MessageEvent) => {
       try {
         const payload: MarketData = JSON.parse(event.data);
-        if (payload.type === 'OrderBook') {
-          setOrderBook(payload.data);
-        } else if (payload.type === 'Trade') {
-          addTrade(payload.data);
+        
+        // #2. Switch on DataType to handle all incoming message types
+        switch (payload.type) {
+            case DataType.OrderBook:
+                // Cast to any to satisfy TS union discrimination in this simple switch
+                setOrderBook(payload.data as any);
+                break;
+            case DataType.Trade:
+                addTrade(payload.data as any);
+                break;
+            // FIX: Handle Live Candles
+            case DataType.Candle:
+                addCandle(payload.data as any);
+                break;
+            // FIX: Handle Bulk History (Infinite Scroll)
+            case DataType.HistoricalCandles:
+                prependHistory(payload.data as any);
+                break;
         }
       } catch (e) {
         // Silently ignore parse errors
       }
     };
-  }, [setOrderBook, addTrade, setConnected]);
+  }, [setOrderBook, addTrade, addCandle, prependHistory, setConnected]);
 
-  // 2. Initial Mount Effect
+  // 2. Setup Effects
   useEffect(() => {
-    connect();
+    const connectionDelay = setTimeout(() => {
+      connect();
+    }, 100);
 
-    // Cleanup on unmount
+    // #3. Setup Listener for outbound commands from Components (e.g. PriceChart)
+    const handleWsSend = (e: Event) => {
+        const customEvent = e as CustomEvent<Command>;
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            console.log("Sending Command:", customEvent.detail);
+            wsRef.current.send(JSON.stringify(customEvent.detail));
+        }
+    };
+    
+    window.addEventListener('ws-send', handleWsSend);
+
     return () => {
+      clearTimeout(connectionDelay);
+      window.removeEventListener('ws-send', handleWsSend); // Cleanup listener
+
       if (wsRef.current) {
-        // Remove the onclose handler to prevent reconnection loops during unmount
         wsRef.current.onclose = null; 
         wsRef.current.close();
+        wsRef.current = null;
       }
       if (reconnectTimeoutRef.current) {
           clearTimeout(reconnectTimeoutRef.current);

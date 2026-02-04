@@ -71,8 +71,6 @@ async fn handle_connection(stream: TcpStream, engine: Engine) {
                                     let symbol: String = cmd.channel.clone();
                                     
                                     // #1. Trigger Ingestion (Dynamic)
-                                    // If this returns true, it means we are the first to ask for it.
-                                    // We spawn the handler. If false, it's already running.
                                     if engine.request_ingestion(symbol.clone()).await {
                                         println!("Starting ingestion for new symbol: {}", symbol);
                                         let engine_clone: Engine = engine.clone();
@@ -85,13 +83,16 @@ async fn handle_connection(stream: TcpStream, engine: Engine) {
                                     // #2. Subscribe to internal broadcast
                                     subscribed_topics.insert(symbol.clone());
 
-                                    // #3. Send Snapshots (OrderBook, Trades, etc...)
+                                    // #3. Send Snapshots (The Fix for Unused Warnings)
+                                    
+                                    // A. OrderBook
                                     if let Some(book) = engine.get_order_book(&symbol).await {
                                         if let Ok(json) = serde_json::to_string(&MarketData::OrderBook(book)) {
                                             let _ = write.send(Message::Text(json)).await;
                                         }
                                     }
 
+                                    // B. Recent Trades
                                     let trades: Vec<Trade> = engine.get_recent_trades(&symbol).await;
                                     for trade in trades {
                                         if let Ok(json) = serde_json::to_string(&MarketData::Trade(trade)) {
@@ -99,6 +100,7 @@ async fn handle_connection(stream: TcpStream, engine: Engine) {
                                         }
                                     }
 
+                                    // C. AggTrades (Fixes unused AggTrade warning)
                                     let agg_trades: Vec<AggTrade> = engine.get_recent_agg_trades(&symbol).await;
                                     for trade in agg_trades {
                                         if let Ok(json) = serde_json::to_string(&MarketData::AggTrade(trade)) {
@@ -106,15 +108,49 @@ async fn handle_connection(stream: TcpStream, engine: Engine) {
                                         }
                                     }
 
+                                    // D. Recent Candles (Fixes unused Candle warning)
+                                    // Note: This sends the small "recent" buffer (e.g., last 100)
                                     let candles: Vec<Candle> = engine.get_recent_candles(&symbol).await;
                                     for candle in candles {
                                         if let Ok(json) = serde_json::to_string(&MarketData::Candle(candle)) {
                                             let _ = write.send(Message::Text(json)).await;
                                         }
                                     }
+                                    
+                                    // E. Historical History (Infinite Scroll Initial Load)
+                                    // We fetch a larger block (e.g. 1000) for the chart
+                                    let now = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_millis() as u64;
+                                        
+                                    let initial_history = engine.get_history(&symbol, now, 1000).await;
+                                    if !initial_history.is_empty() {
+                                        // Send as bulk history packet
+                                        if let Ok(json) = serde_json::to_string(&MarketData::HistoricalCandles(initial_history)) {
+                                            let _ = write.send(Message::Text(json)).await;
+                                        }
+                                    }
                                 }
                                 CommandAction::Unsubscribe => {
                                     subscribed_topics.remove(&cmd.channel);
+                                }
+                                // Handle Infinite Scroll Requests
+                                CommandAction::FetchHistory => {
+                                    let symbol = cmd.channel.clone();
+                                    let end_time = cmd.end_time.unwrap_or_else(|| {
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap()
+                                            .as_millis() as u64
+                                    });
+
+                                    println!("Serving history for {} before {}", symbol, end_time);
+                                    let history = engine.get_history(&symbol, end_time, 1000).await;
+                                    
+                                    if let Ok(json) = serde_json::to_string(&MarketData::HistoricalCandles(history)) {
+                                        let _ = write.send(Message::Text(json)).await;
+                                    }
                                 }
                             }
                         }
@@ -132,6 +168,8 @@ async fn handle_connection(stream: TcpStream, engine: Engine) {
                             MarketData::Trade(trade) => &trade.symbol,
                             MarketData::AggTrade(trade) => &trade.symbol,
                             MarketData::Candle(candle) => &candle.symbol,
+                            // Do not broadcast historical packets to all subscribers
+                            MarketData::HistoricalCandles(_) => continue, 
                         };
 
                         if subscribed_topics.contains(symbol) {

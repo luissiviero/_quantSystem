@@ -1,24 +1,39 @@
 // @file: PriceChart.tsx
-// @description: Wrapper for TradingView's lightweight-charts with proper data buffering.
+// @description: Candlestick chart with infinite scroll history loading and defensive sorting.
 // @author: v5 helper
 
 import React, { useEffect, useRef } from 'react';
-import { createChart, ColorType, IChartApi, ISeriesApi, LineData, Time } from 'lightweight-charts';
+import { 
+  createChart, 
+  ColorType, 
+  IChartApi, 
+  ISeriesApi, 
+  Time,
+} from 'lightweight-charts';
 import { useMarketStore } from '../store/useMarketStore';
-import { Trade } from '../models/types';
-
-//
-// COMPONENT LOGIC
-//
+import { Command } from '../models/types';
 
 const PriceChart: React.FC = () => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const seriesRef = useRef<ISeriesApi<"Area"> | null>(null);
+  const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   
-  const { recentTrades } = useMarketStore();
+  const { candles, latestCandle, isLoadingHistory, setLoadingHistory } = useMarketStore();
+  
+  // 1. Send History Request Helper
+  const requestHistory = (endTime: number) => {
+      const event = new CustomEvent('ws-send', { 
+          detail: { 
+              action: 'fetch_history', 
+              channel: 'BTCUSDT', 
+              end_time: endTime 
+          } 
+      });
+      window.dispatchEvent(event);
+      setLoadingHistory(true);
+  };
 
-  // 1. Initialize Chart
+  // 2. Chart Initialization
   useEffect(() => {
     if (!chartContainerRef.current) return;
 
@@ -35,35 +50,40 @@ const PriceChart: React.FC = () => {
       height: chartContainerRef.current.clientHeight,
       timeScale: {
         timeVisible: true,
-        secondsVisible: true,
-        borderColor: '#4b5563',
-      },
-      rightPriceScale: {
-        borderColor: '#4b5563',
-        scaleMargins: {
-            top: 0.1,
-            bottom: 0.1,
-        }
+        secondsVisible: false,
       },
     });
 
-    const newSeries = chart.addAreaSeries({
-      lineColor: '#2563eb',
-      topColor: 'rgba(37, 99, 235, 0.4)',
-      bottomColor: 'rgba(37, 99, 235, 0)',
-      lineWidth: 2,
+    const newSeries = chart.addCandlestickSeries({
+        upColor: '#22c55e',
+        downColor: '#ef4444',
+        borderVisible: false,
+        wickUpColor: '#22c55e',
+        wickDownColor: '#ef4444',
     });
 
     chartRef.current = chart;
     seriesRef.current = newSeries;
 
+    // #3. INFINITE SCROLL LOGIC
+    chart.timeScale().subscribeVisibleLogicalRangeChange((newLogicalRange) => {
+        if (!newLogicalRange) return;
+
+        if (newLogicalRange.from < 10 && !useMarketStore.getState().isLoadingHistory) {
+            const currentCandles = useMarketStore.getState().candles;
+            if (currentCandles.length > 0) {
+                const oldestTime = currentCandles[0].start_time;
+                console.log("Loading history before:", oldestTime);
+                requestHistory(oldestTime);
+            }
+        }
+    });
+
     const handleResize = () => {
-      if (chartContainerRef.current) {
-        chart.applyOptions({ 
-            width: chartContainerRef.current.clientWidth,
-            height: chartContainerRef.current.clientHeight 
-        });
-      }
+      chart.applyOptions({ 
+        width: chartContainerRef.current?.clientWidth || 0,
+        height: chartContainerRef.current?.clientHeight || 0 
+      });
     };
 
     window.addEventListener('resize', handleResize);
@@ -74,41 +94,46 @@ const PriceChart: React.FC = () => {
     };
   }, []);
 
-  // 2. Update Data
+  // 3. React to Data Changes (Initial Load & Prepend)
   useEffect(() => {
-    if (!seriesRef.current || recentTrades.length === 0) return;
+    if (!seriesRef.current || candles.length === 0) return;
 
-    // 2a. Transform Data
-    // Store is Newest -> Oldest. Chart needs Oldest -> Newest.
-    const sortedData = [...recentTrades].reverse().map((t: Trade) => ({
-        // Use Seconds for TimeScale
-        time: (Math.floor(t.time / 1000)) as Time, 
-        value: t.price,
+    // Map store candles to Chart format
+    const data = candles.map(c => ({
+        time: (c.start_time / 1000) as Time,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close
     }));
 
-    // 2b. Deduplicate and take Closing Price
-    // Logic: Since sortedData is Oldest->Newest, setting the map key overwrites previous values.
-    // This effectively selects the *last* price that occurred in a specific second (Closing Price).
-    const uniqueMap = new Map<Time, LineData>();
-    
-    for (const item of sortedData) {
-        uniqueMap.set(item.time as Time, item as LineData);
-    }
-    
-    const uniqueData = Array.from(uniqueMap.values());
+    // FAIL-SAFE: Sort explicitly in the view layer to prevent crashes
+    data.sort((a, b) => (a.time as number) - (b.time as number));
 
-    // 2c. Set Data
-    seriesRef.current.setData(uniqueData);
-    
-  }, [recentTrades]);
+    seriesRef.current.setData(data);
+  }, [candles.length]); 
+
+  // 4. React to Live Updates (Incremental)
+  useEffect(() => {
+      if (!seriesRef.current || !latestCandle) return;
+      
+      seriesRef.current.update({
+          time: (latestCandle.start_time / 1000) as Time,
+          open: latestCandle.open,
+          high: latestCandle.high,
+          low: latestCandle.low,
+          close: latestCandle.close
+      });
+  }, [latestCandle]);
 
   return (
-    <div className="bg-gray-800 rounded-lg border border-gray-700 h-full w-full p-2 flex flex-col">
-      <div className="flex justify-between items-center px-2 mb-2">
-         <h2 className="text-sm font-bold text-gray-400">BTC/USDT - Realtime</h2>
-         <span className="text-xs text-gray-500">Live Feed</span>
-      </div>
-      <div ref={chartContainerRef} className="flex-1 w-full h-full overflow-hidden rounded" />
+    <div className="bg-gray-800 rounded-lg border border-gray-700 h-full w-full flex flex-col relative">
+       {isLoadingHistory && (
+           <div className="absolute top-4 left-1/2 transform -translate-x-1/2 bg-blue-600 text-white text-xs px-3 py-1 rounded-full shadow-lg z-10 animate-pulse">
+               Loading History...
+           </div>
+       )}
+       <div ref={chartContainerRef} className="flex-1 w-full h-full overflow-hidden" />
     </div>
   );
 };

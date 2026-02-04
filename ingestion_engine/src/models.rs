@@ -14,7 +14,6 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderBook {
     pub symbol: String,
-    // Optimization: Using Arc<[T]> removes one layer of pointer indirection
     pub bids: Arc<[PriceLevel]>,
     pub asks: Arc<[PriceLevel]>,
     pub last_update_id: u64,
@@ -33,13 +32,13 @@ pub struct PriceLevel {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum TradeSide {
-    Buy,  // Taker was a Buyer (Price UP)
-    Sell, // Taker was a Seller (Price DOWN)
+    Buy, 
+    Sell,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trade {
-    pub id: u64,              // Unique Trade ID
+    pub id: u64,
     pub symbol: String,
     pub price: f64,
     pub quantity: f64,
@@ -49,14 +48,14 @@ pub struct Trade {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AggTrade {
-    pub id: u64,              // Aggregate Trade ID
+    pub id: u64,
     pub symbol: String,
     pub price: f64,
     pub quantity: f64,
     pub timestamp_ms: u64,
     pub side: TradeSide,
-    pub first_trade_id: u64,  // Range start
-    pub last_trade_id: u64,   // Range end
+    pub first_trade_id: u64,
+    pub last_trade_id: u64,
 }
 
 
@@ -84,12 +83,14 @@ pub struct Candle {
 //
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", content = "data")]
 pub enum MarketData {
     OrderBook(OrderBook),
     Trade(Trade),
-    AggTrade(AggTrade), // #1. Added AggTrade Variant
+    AggTrade(AggTrade),
     Candle(Candle),
+    // #1. New Variant for Bulk History
+    HistoricalCandles(Vec<Candle>), 
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -97,10 +98,14 @@ pub enum MarketData {
 pub enum CommandAction {
     Subscribe,
     Unsubscribe,
+    // #2. New Action
+    FetchHistory, 
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Command {
     pub action: CommandAction,
     pub channel: String,
+    // #3. Optional Cursor for pagination (Time in ms)
+    pub end_time: Option<u64>, 
 }

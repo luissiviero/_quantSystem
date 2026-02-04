@@ -4,7 +4,7 @@
 
 import React from 'react';
 import { useMarketStore } from '../store/useMarketStore';
-import { Trade } from '../models/types';
+import { Trade, TradeSide } from '../models/types';
 
 //
 // COMPONENT LOGIC
@@ -37,11 +37,15 @@ const RecentTrades: React.FC = () => {
         ) : (
           // FIX: Slice the large history array to only show the last 50 items in the UI list
           recentTrades.slice(0, 50).map((trade: Trade, index: number) => {
-            const isSell: boolean = trade.is_buyer_maker;
+            // Guard clause for safety in case of bad data
+            if (!trade) return null;
+
+            // FIX: Use 'side' property instead of 'is_buyer_maker'
+            const isSell: boolean = trade.side === TradeSide.Sell;
             const colorClass: string = isSell ? 'text-red-400' : 'text-green-400';
 
             return (
-              <div key={`${trade.time}-${index}`} className="grid grid-cols-3 text-sm hover:bg-gray-700/50 rounded p-1">
+              <div key={`${trade.id || index}`} className="grid grid-cols-3 text-sm hover:bg-gray-700/50 rounded p-1">
                 <span className={`${colorClass} font-mono`}>
                   {trade.price.toFixed(2)}
                 </span>
@@ -49,7 +53,7 @@ const RecentTrades: React.FC = () => {
                   {trade.quantity.toFixed(5)}
                 </span>
                 <span className="text-gray-500 text-right text-xs pt-0.5">
-                  {formatTime(trade.time)}
+                  {formatTime(trade.timestamp_ms)}
                 </span>
               </div>
             );

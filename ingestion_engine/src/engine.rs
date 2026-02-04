@@ -214,4 +214,30 @@ impl Engine {
         }
         result
     }
+
+    // #5. NEW: Historical Accessor for Infinite Scroll
+    pub async fn get_history(&self, symbol: &str, end_time: u64, limit: usize) -> Vec<Candle> {
+        let candles_guard = self.recent_candles.read().await;
+        let mut result: Vec<Candle> = Vec::new();
+
+        if let Some(interval_map) = candles_guard.get(symbol) {
+            // Flatten all intervals for the symbol
+            for queue in interval_map.values() {
+                // Filter: Only take candles strictly OLDER than end_time
+                let older_candles = queue.iter().filter(|c| c.start_time < end_time);
+                result.extend(older_candles.cloned());
+            }
+        }
+
+        // Sort by time to ensure order after flattening
+        result.sort_by_key(|c| c.start_time);
+
+        // Take the *last* 'limit' items (closest to the end_time)
+        if result.len() > limit {
+            let start = result.len() - limit;
+            result.drain(start..).collect()
+        } else {
+            result
+        }
+    }
 }

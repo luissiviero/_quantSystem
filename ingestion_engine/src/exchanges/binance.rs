@@ -106,11 +106,16 @@ pub async fn connect_binance(symbol: String, engine: Engine) {
         let url_str: String = format!("{}/{}", BINANCE_WS_URL, stream_string);
         let url: Url = Url::parse(&url_str).expect("Bad URL structure");
 
+        // FIX: Conditional compilation to hide logs during 'cargo test'
+        #[cfg(not(test))]
         println!("Connecting to Binance: {}", url);
 
         match connect_async(url).await {
             Ok((ws_stream, _)) => {
+                // FIX: Conditional compilation to hide logs during 'cargo test'
+                #[cfg(not(test))]
                 println!("Successfully connected to Binance for {}", symbol);
+                
                 backoff_seconds = 1;
                 let (_, mut read) = ws_stream.split();
 

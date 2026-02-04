@@ -23,7 +23,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 #[tokio::main]
 async fn main() {
-    // #2. Initialize Shared Engine State
+    // #2. Initialize Shared Engine State + logger
+    env_logger::init();
     let engine: Engine = Engine::new();
 
     println!("Starting QuantSystem Ingestion Engine...");

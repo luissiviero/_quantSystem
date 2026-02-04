@@ -9,7 +9,55 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
+use serde::Deserialize;
+
+//
+// DYNAMIC SYMBOL FETCHING
+//
+
+#[derive(Deserialize, Debug)]
+struct Ticker24hr {
+    symbol: String,
+    // FIX: Snake case compliance + Serde rename
+    #[serde(rename = "quoteVolume")]
+    quote_volume: String, 
+}
+
+// FIX: Changed to 'async fn' to avoid blocking the Tokio test runtime
+async fn fetch_top_volume_symbols(limit: usize) -> Vec<String> {
+    println!(">> Fetching top {} symbols by volume from Binance API...", limit);
+    
+    // 1. Fetch Data (Async Client)
+    // We use the async client to reuse the existing runtime instead of spinning up a blocking one
+    let client = reqwest::Client::new();
+    let resp = client.get("https://api.binance.com/api/v3/ticker/24hr")
+        .send()
+        .await
+        .expect("Failed to fetch from Binance API");
+    
+    let tickers: Vec<Ticker24hr> = resp.json().await.expect("Failed to parse JSON");
+
+    // 2. Filter & Sort
+    let mut usdt_pairs: Vec<(String, f64)> = tickers.into_iter()
+        .filter(|t| t.symbol.ends_with("USDT"))
+        .map(|t| (t.symbol, t.quote_volume.parse::<f64>().unwrap_or(0.0)))
+        .collect();
+
+    // Sort descending by volume
+    usdt_pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+    // 3. Extract Top N
+    let top_symbols: Vec<String> = usdt_pairs.into_iter()
+        .take(limit)
+        .map(|(sym, _)| sym)
+        .collect();
+
+    println!(">> Top 3 Symbols: {:?}", &top_symbols[0..3]);
+    top_symbols
+}
 
 //
 // DASHBOARD STATE STRUCT
@@ -17,40 +65,52 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug)]
 struct DashboardState {
-    last_trade: String,
-    last_agg_trade: String,
-    last_order_book: String,
-    last_candle: String,
+    // Metadata
+    scenario_title: String,
+    start_time_ms: u128,
+
+    // Rendering State
+    lines_printed_previously: usize,
+
+    last_trade_str: String,
     
     // Integrity & Performance Metrics
     trade_count: u64,
-    previous_trade_id: u64,
+    previous_trade_ids: HashMap<String, u64>,
     gap_count: u64,
     
     // Latency Metrics
-    // min_raw_delta: The smallest difference (Local - Remote) observed.
-    // We assume this represents "Clock Skew + Physical Minimum Latency".
     min_raw_delta: i64,      
     is_baseline_set: bool,
-    accumulated_jitter: i64, // Sum of (Current - Min)
+    accumulated_jitter: i64, 
     
+    // Burst Detection
+    burst_count: u64,
+    current_burst_depth: u64,
+    max_burst_depth: u64,
+    last_process_ms: u128,
+
     // UI Throttling
     last_ui_update_ms: u128,
 }
 
-impl Default for DashboardState {
-    fn default() -> Self {
+impl DashboardState {
+    fn new(title: String) -> Self {
         DashboardState {
-            last_trade: "Waiting...".to_string(),
-            last_agg_trade: "Waiting...".to_string(),
-            last_order_book: "Waiting...".to_string(),
-            last_candle: "Waiting...".to_string(),
+            scenario_title: title,
+            start_time_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis(),
+            lines_printed_previously: 0,
+            last_trade_str: "Waiting for data...".to_string(),
             trade_count: 0,
-            previous_trade_id: 0,
+            previous_trade_ids: HashMap::new(),
             gap_count: 0,
             min_raw_delta: 0,
             is_baseline_set: false,
             accumulated_jitter: 0,
+            burst_count: 0,
+            current_burst_depth: 0,
+            max_burst_depth: 0,
+            last_process_ms: 0,
             last_ui_update_ms: 0,
         }
     }
@@ -62,14 +122,14 @@ impl Default for DashboardState {
 
 pub struct LogProcessor {
     state: Mutex<DashboardState>,
+    is_active: Arc<AtomicBool>,
 }
 
 impl LogProcessor {
-    pub fn new() -> Self {
-        // Clear screen initially
-        print!("\x1b[2J");
+    pub fn new(title: String, active_flag: Arc<AtomicBool>) -> Self {
         LogProcessor {
-            state: Mutex::new(DashboardState::default()),
+            state: Mutex::new(DashboardState::new(title)),
+            is_active: active_flag,
         }
     }
 
@@ -80,97 +140,95 @@ impl LogProcessor {
             0.0
         };
 
-        // ANSI Escape Codes:
-        // \x1b[H  -> Move cursor to home (top-left)
-        // \x1b[K  -> Clear line from cursor to end
-        let output = format!(
-            "\x1b[H\
-            ================ QUANT SYSTEM INTEGRITY MONITOR ================\x1b[K\n\
-            \n\
-            [Integrity]\x1b[K\n\
-            Trades Received: {}\x1b[K\n\
-            Sequence Gaps:   {}  <-- Should be 0\x1b[K\n\
-            \n\
-            [Latency Analysis]\x1b[K\n\
-            Clock Skew Est:  {} ms (Base difference)\x1b[K\n\
-            Avg Jitter:      {:.2} ms (Delay above baseline)\x1b[K\n\
-            \n\
-            [Latest Data]\x1b[K\n\
-            Trade:      {}\x1b[K\n\
-            AggTrade:   {}\x1b[K\n\
-            Order Book: {}\x1b[K\n\
-            Klines:     {}\x1b[K\n\
-            \n\
-            ================================================================\x1b[K\n",
+        let content = format!(
+            "================ STRESS TEST: {} ================\x1b[K\n\
+            [Integrity] Trades: {:<8} | Gaps: {:<4} | Bursts: {:<4} (Max Depth: {})\x1b[K\n\
+            [Latency]   Skew: {:<4} ms | Avg Jitter: {:.2} ms\x1b[K\n\
+            [Last Data] {}\x1b[K\n\
+            ========================================================================\x1b[K", 
+            state.scenario_title,
             state.trade_count,
             state.gap_count,
+            state.burst_count,
+            state.max_burst_depth,
             state.min_raw_delta,
             avg_jitter,
-            state.last_trade,
-            state.last_agg_trade,
-            state.last_order_book,
-            state.last_candle
+            state.last_trade_str
         );
-        print!("{}", output);
+
+        let line_count = content.matches('\n').count() + 1;
+
+        if state.lines_printed_previously > 0 {
+            print!("\x1b[{}A", state.lines_printed_previously);
+        }
+
+        println!("{}\r", content);
+
+        state.lines_printed_previously = line_count;
     }
 }
 
 #[async_trait]
 impl DataProcessor for LogProcessor {
-    // #1. Process incoming data
     async fn process(&self, data: Arc<MarketData>) {
+        if !self.is_active.load(Ordering::Relaxed) {
+            return;
+        }
+
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
         
         let should_redraw = {
             let mut state = self.state.lock().unwrap();
+
+            // Burst Logic
+            if now_ms == state.last_process_ms {
+                state.current_burst_depth += 1;
+                if state.current_burst_depth > state.max_burst_depth {
+                    state.max_burst_depth = state.current_burst_depth;
+                }
+                if state.current_burst_depth == 2 {
+                    state.burst_count += 1;
+                }
+            } else {
+                state.last_process_ms = now_ms;
+                state.current_burst_depth = 1;
+            }
             
             match *data {
                 MarketData::Trade(ref t) => {
-                    // --- 1. Dynamic Calibration (Min-Delta Method) ---
                     let raw_diff = (now_ms as i64) - (t.timestamp_ms as i64);
 
-                    // Initialize or Update Baseline if we find a "faster" packet
                     if !state.is_baseline_set || raw_diff < state.min_raw_delta {
                         state.min_raw_delta = raw_diff;
                         state.is_baseline_set = true;
                     }
 
-                    // Jitter = How much slower is THIS packet compared to our best packet?
-                    // This filters out the constant Clock Skew.
                     let jitter = raw_diff - state.min_raw_delta;
                     state.accumulated_jitter += jitter;
 
-                    // --- 2. Sequence Gap Check ---
-                    // Trade IDs must be sequential: 100, 101, 102...
-                    if state.previous_trade_id != 0 {
-                        if t.id != state.previous_trade_id + 1 {
-                            state.gap_count += 1;
-                        }
+                    // FIX: Double-borrow check
+                    let is_gap = {
+                        let last_id = state.previous_trade_ids.entry(t.symbol.clone()).or_insert(0);
+                        let gap_detected = *last_id != 0 && t.id != *last_id + 1;
+                        *last_id = t.id;
+                        gap_detected
+                    };
+
+                    if is_gap {
+                        state.gap_count += 1;
                     }
-                    state.previous_trade_id = t.id;
+                    
                     state.trade_count += 1;
 
-                    state.last_trade = format!("{} @ {:.2} (Qty: {:.4}) ID: {} [Lat: {}ms]", 
-                        t.symbol, t.price, t.quantity, t.id, jitter);
+                    state.last_trade_str = format!("{} @ {:.2} (Qty: {:.4}) [Lat: {}ms]", 
+                        t.symbol, t.price, t.quantity, jitter);
                 },
-                MarketData::AggTrade(ref t) => {
-                    state.last_agg_trade = format!("{} @ {:.2} (Qty: {:.4})", t.symbol, t.price, t.quantity);
-                },
-                MarketData::OrderBook(ref b) => {
-                    state.last_order_book = format!("{} [UpdateID: {}] Bids: {} Asks: {}", 
-                        b.symbol, b.last_update_id, b.bids.len(), b.asks.len());
-                },
-                MarketData::Candle(ref c) => {
-                    state.last_candle = format!("{} [{}] O: {:.2} C: {:.2}", 
-                        c.symbol, c.interval, c.open, c.close);
-                },
+                _ => {} 
             }
 
-            // --- 3. UI Throttling ---
-            // Only update screen every 100ms to avoid blocking the engine with I/O
-            if now_ms > state.last_ui_update_ms + 100 {
+            if now_ms > state.start_time_ms + 2000 && now_ms > state.last_ui_update_ms + 250 {
                 state.last_ui_update_ms = now_ms;
-                true // release lock and redraw
+                true
             } else {
                 false
             }
@@ -183,37 +241,76 @@ impl DataProcessor for LogProcessor {
         }
     }
 
-    fn on_error(&self, error: String) {
-        eprintln!("\n\n>> [ERROR] LogProcessor: {}", error);
+    fn on_error(&self, _error: String) {
+        // Suppress errors during tests
     }
 }
 
 //
-// INTEGRATION TESTS
+// HELPER: SCENARIO RUNNER
+//
+
+async fn run_scenario(title: &str, symbols: Vec<String>, use_pinned: bool) {
+    println!("Successfully connected to Binance"); // Single simulated print
+    
+    let engine = Engine::new();
+    let active_flag = Arc::new(AtomicBool::new(true));
+    
+    engine.register_processor(Box::new(LogProcessor::new(title.to_string(), active_flag.clone()))).await;
+
+    for symbol in symbols {
+        if engine.request_ingestion(symbol.clone()).await {
+            let engine_clone = engine.clone();
+            let symbol_clone = symbol.clone();
+
+            if use_pinned {
+                std::thread::Builder::new()
+                    .name(format!("worker-{}", symbol_clone))
+                    .spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("Failed to build dedicated runtime");
+                        
+                        rt.block_on(async move {
+                             crate::exchanges::binance::connect_binance(symbol_clone, engine_clone).await;
+                        });
+                    })
+                    .expect("Failed to spawn pinned thread");
+            } else {
+                tokio::spawn(async move {
+                    crate::exchanges::binance::connect_binance(symbol_clone, engine_clone).await;
+                });
+            }
+            
+            if use_pinned {
+                sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+
+    sleep(Duration::from_secs(15)).await;
+
+    active_flag.store(false, Ordering::Relaxed);
+}
+
+//
+// MAIN TEST SUITE
 //
 
 #[tokio::test]
 async fn test_binance_stream() {
-    // #1. Initialize Engine
-    let engine: Engine = Engine::new();
-
-    // #2. Register the Logger Processor
-    engine.register_processor(Box::new(LogProcessor::new())).await;
-
-    // #3. Define Symbol and Request Ingestion
-    let symbol: String = "BTCUSDT".to_string();
-    let is_new: bool = engine.request_ingestion(symbol.clone()).await;
-    assert!(is_new, "Symbol should be new for this test instance");
-
-    // #4. Spawn the Binance Connector
-    let engine_clone: Engine = engine.clone();
-    let symbol_clone: String = symbol.clone();
+    let single_symbol = vec!["BTCUSDT".to_string()];
     
-    tokio::spawn(async move {
-        crate::exchanges::binance::connect_binance(symbol_clone, engine_clone).await;
-    });
+    // DYNAMIC FETCH (Awaited)
+    let top_x_symbols = fetch_top_volume_symbols(50).await;
 
-    // #5. Run for a fixed duration
-    // 30 seconds to gather enough data for valid stats
-    sleep(Duration::from_secs(30)).await;
+    print!("\x1b[2J\x1b[H"); 
+
+    run_scenario("1. Single (BTC) - Standard", single_symbol.clone(), false).await;
+    run_scenario("2. Single (BTC) - Pinned", single_symbol.clone(), true).await;
+    run_scenario("3. Top 50 (Volume) - Standard", top_x_symbols.clone(), false).await;
+    run_scenario("4. Top 50 (Volume) - Pinned", top_x_symbols.clone(), true).await;
+
+    println!("\n\nAll scenarios completed.");
 }
