@@ -1,12 +1,12 @@
 // @file: engine.rs
 // @description: Core engine managing market state with pre-serialized broadcasting to reduce egress CPU load.
 // @author: v5 helper
-// ingestion_engine\src\engine.rs
+// ingestion_engine/src/engine.rs
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
-use crate::models::{OrderBook, Trade, MarketData};
+use crate::models::{OrderBook, Trade, AggTrade, Candle, MarketData};
 use crate::interfaces::DataProcessor;
 
 
@@ -16,6 +16,8 @@ use crate::interfaces::DataProcessor;
 
 pub type SharedOrderBook = Arc<RwLock<HashMap<String, OrderBook>>>;
 pub type SharedTrades = Arc<RwLock<HashMap<String, VecDeque<Trade>>>>;
+pub type SharedAggTrades = Arc<RwLock<HashMap<String, VecDeque<AggTrade>>>>;
+pub type SharedCandles = Arc<RwLock<HashMap<String, HashMap<String, VecDeque<Candle>>>>>; 
 pub type ProcessorList = Arc<RwLock<Vec<Box<dyn DataProcessor>>>>;
 
 
@@ -27,8 +29,9 @@ pub type ProcessorList = Arc<RwLock<Vec<Box<dyn DataProcessor>>>>;
 pub struct Engine {
     pub order_books: SharedOrderBook,
     pub recent_trades: SharedTrades,
+    pub recent_agg_trades: SharedAggTrades, // #1. New Storage
+    pub recent_candles: SharedCandles,
     pub processors: ProcessorList,
-    // #1. Optimization: Broadcast serialized JSON (String) to avoid redundant serialization
     pub tx: broadcast::Sender<(String, Arc<MarketData>)>, 
 }
 
@@ -44,6 +47,8 @@ impl Engine {
         Engine {
             order_books: Arc::new(RwLock::new(HashMap::new())),
             recent_trades: Arc::new(RwLock::new(HashMap::new())),
+            recent_agg_trades: Arc::new(RwLock::new(HashMap::new())), // #2. Initialize
+            recent_candles: Arc::new(RwLock::new(HashMap::new())),
             processors: Arc::new(RwLock::new(Vec::new())),
             tx,
         }
@@ -55,10 +60,7 @@ impl Engine {
     //
 
     pub async fn register_processor(&self, processor: Box<dyn DataProcessor>) {
-        // #1. Acquire write lock on processors list
         let mut processors_guard = self.processors.write().await;
-
-        // #2. Insert new processor
         processors_guard.push(processor);
     }
 
@@ -68,14 +70,58 @@ impl Engine {
     //
 
     pub async fn update_order_book(&self, symbol: String, book: OrderBook) {
-        // #1. Update internal state
         {
             let mut books_guard = self.order_books.write().await;
             books_guard.insert(symbol.clone(), book.clone());
         }
         
-        // #2. Pre-serialize for egress efficiency
         let market_data: MarketData = MarketData::OrderBook(book);
+        if let Ok(json) = serde_json::to_string(&market_data) {
+            let msg: Arc<MarketData> = Arc::new(market_data);
+            self.notify_processors(msg.clone()).await;
+            let _ = self.tx.send((json, msg));
+        }
+    }
+
+
+    pub async fn add_trade(&self, symbol: String, trade: Trade) {
+        {
+            let mut trades_guard = self.recent_trades.write().await;
+            let trades_queue: &mut VecDeque<Trade> = trades_guard
+                .entry(symbol)
+                .or_insert_with(VecDeque::new);
+            
+            trades_queue.push_back(trade.clone());
+            if trades_queue.len() > 100 {
+                trades_queue.pop_front();
+            }
+        }
+
+        let market_data: MarketData = MarketData::Trade(trade);
+        if let Ok(json) = serde_json::to_string(&market_data) {
+            let msg: Arc<MarketData> = Arc::new(market_data);
+            self.notify_processors(msg.clone()).await;
+            let _ = self.tx.send((json, msg));
+        }
+    }
+
+
+    pub async fn add_agg_trade(&self, symbol: String, trade: AggTrade) {
+        // #1. Update internal state
+        {
+            let mut trades_guard = self.recent_agg_trades.write().await;
+            let trades_queue: &mut VecDeque<AggTrade> = trades_guard
+                .entry(symbol)
+                .or_insert_with(VecDeque::new);
+            
+            trades_queue.push_back(trade.clone());
+            if trades_queue.len() > 100 {
+                trades_queue.pop_front();
+            }
+        }
+
+        // #2. Pre-serialize
+        let market_data: MarketData = MarketData::AggTrade(trade);
         if let Ok(json) = serde_json::to_string(&market_data) {
             let msg: Arc<MarketData> = Arc::new(market_data);
             
@@ -86,23 +132,27 @@ impl Engine {
     }
 
 
-    pub async fn add_trade(&self, symbol: String, trade: Trade) {
-        // #1. Update internal state
+    pub async fn add_candle(&self, symbol: String, candle: Candle) {
         {
-            let mut trades_guard = self.recent_trades.write().await;
-            let trades_queue = trades_guard.entry(symbol).or_insert_with(VecDeque::new);
-            trades_queue.push_back(trade.clone());
-            if trades_queue.len() > 100 {
-                trades_queue.pop_front();
+            let mut candles_guard = self.recent_candles.write().await;
+            let interval_map: &mut HashMap<String, VecDeque<Candle>> = candles_guard
+                .entry(symbol.clone())
+                .or_insert_with(HashMap::new);
+
+            let candles_queue: &mut VecDeque<Candle> = interval_map
+                .entry(candle.interval.clone())
+                .or_insert_with(VecDeque::new);
+
+            candles_queue.push_back(candle.clone());
+
+            if candles_queue.len() > 5000 {
+                candles_queue.pop_front();
             }
         }
 
-        // #2. Pre-serialize
-        let market_data: MarketData = MarketData::Trade(trade);
+        let market_data: MarketData = MarketData::Candle(candle);
         if let Ok(json) = serde_json::to_string(&market_data) {
             let msg: Arc<MarketData> = Arc::new(market_data);
-            
-            // #3. Notify & Broadcast
             self.notify_processors(msg.clone()).await;
             let _ = self.tx.send((json, msg));
         }
@@ -133,5 +183,27 @@ impl Engine {
             Some(queue) => queue.iter().cloned().collect(),
             None => Vec::new(),
         }
+    }
+
+
+    pub async fn get_recent_agg_trades(&self, symbol: &str) -> Vec<AggTrade> {
+        let trades = self.recent_agg_trades.read().await;
+        match trades.get(symbol) {
+            Some(queue) => queue.iter().cloned().collect(),
+            None => Vec::new(),
+        }
+    }
+
+
+    pub async fn get_recent_candles(&self, symbol: &str) -> Vec<Candle> {
+        let candles_guard = self.recent_candles.read().await;
+        let mut result: Vec<Candle> = Vec::new();
+
+        if let Some(interval_map) = candles_guard.get(symbol) {
+            for queue in interval_map.values() {
+                result.extend(queue.iter().cloned());
+            }
+        }
+        result
     }
 }

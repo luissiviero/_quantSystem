@@ -1,7 +1,7 @@
 // @file: server.rs
 // @description: WebSocket server utilizing pre-serialized data streams for O(1) broadcast complexity.
 // @author: v5 helper
-// ingestion_engine\src\server.rs
+// ingestion_engine/src/server.rs
 
 use std::net::SocketAddr;
 use std::collections::HashSet;
@@ -10,13 +10,12 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 use crate::engine::Engine;
-use crate::models::{Command, CommandAction, MarketData, Trade};
+use crate::models::{Command, CommandAction, MarketData, Trade, AggTrade, Candle};
 
 
 //
 // CONSTANTS
 //
-
 
 const SERVER_ADDR: &str = "127.0.0.1:8080";
 
@@ -24,7 +23,6 @@ const SERVER_ADDR: &str = "127.0.0.1:8080";
 //
 // SERVER ENTRY POINT
 //
-
 
 pub async fn start_server(engine: Engine) {
     let addr: SocketAddr = SERVER_ADDR.parse().expect("Invalid address");
@@ -42,7 +40,6 @@ pub async fn start_server(engine: Engine) {
 //
 // CONNECTION HANDLER
 //
-
 
 async fn handle_connection(stream: TcpStream, engine: Engine) {
     let ws_stream = match accept_async(stream).await {
@@ -79,10 +76,26 @@ async fn handle_connection(stream: TcpStream, engine: Engine) {
                                         }
                                     }
 
-                                    // #2. Send Recent Trades snapshot (Restored Logic)
+                                    // #2. Send Recent Trades snapshot
                                     let trades: Vec<Trade> = engine.get_recent_trades(&symbol).await;
                                     for trade in trades {
                                         if let Ok(json) = serde_json::to_string(&MarketData::Trade(trade)) {
+                                            let _ = write.send(Message::Text(json)).await;
+                                        }
+                                    }
+
+                                    // #3. Send Recent AggTrades snapshot (New)
+                                    let agg_trades: Vec<AggTrade> = engine.get_recent_agg_trades(&symbol).await;
+                                    for trade in agg_trades {
+                                        if let Ok(json) = serde_json::to_string(&MarketData::AggTrade(trade)) {
+                                            let _ = write.send(Message::Text(json)).await;
+                                        }
+                                    }
+
+                                    // #4. Send Recent Candles snapshot
+                                    let candles: Vec<Candle> = engine.get_recent_candles(&symbol).await;
+                                    for candle in candles {
+                                        if let Ok(json) = serde_json::to_string(&MarketData::Candle(candle)) {
                                             let _ = write.send(Message::Text(json)).await;
                                         }
                                     }
@@ -105,9 +118,11 @@ async fn handle_connection(stream: TcpStream, engine: Engine) {
                         let symbol: &String = match &*data_arc {
                             MarketData::OrderBook(book) => &book.symbol,
                             MarketData::Trade(trade) => &trade.symbol,
+                            MarketData::AggTrade(trade) => &trade.symbol, // Handle AggTrade
+                            MarketData::Candle(candle) => &candle.symbol,
                         };
 
-                        // #2. Direct string forward (Zero-compute egress)
+                        // #2. Direct string forward
                         if subscribed_topics.contains(symbol) {
                             if write.send(Message::Text(json_str)).await.is_err() {
                                 break;
@@ -115,7 +130,7 @@ async fn handle_connection(stream: TcpStream, engine: Engine) {
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        continue; // Client too slow, skip frames but keep connection
+                        continue;
                     }
                     Err(_) => break,
                 }
