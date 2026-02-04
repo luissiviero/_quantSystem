@@ -183,8 +183,8 @@ async fn handle_message(symbol: &str, text: &str, engine: &Engine) -> Result<(),
         let asks: Vec<PriceLevel> = parse_raw_levels(&ev.asks);
         let book: OrderBook = OrderBook {
             symbol: symbol.to_string(),
-            bids: Arc::new(bids),
-            asks: Arc::new(asks),
+            bids: Arc::from(bids),
+            asks: Arc::from(asks),
             last_update_id: ev.last_update_id,
         };
         engine.update_order_book(symbol.to_string(), book).await;

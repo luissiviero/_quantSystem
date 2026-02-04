@@ -1,9 +1,8 @@
-// @file: engine_bench.rs
+// @file: src/tests/engine_bench.rs
 // @description: High-performance internal benchmark to verify Engine throughput and CPU efficiency.
 // @author: v5 helper
-// ingestion_engine/src/engine_bench.rs
 
-#[cfg(test)]
+#[allow(dead_code)]
 mod tests {
     use crate::engine::Engine;
     use crate::models::{Trade, TradeSide};
@@ -24,6 +23,7 @@ mod tests {
     async fn test_engine_throughput() {
         // #1. Initialize Engine
         let engine: Engine = Engine::new();
+        // Subscribe to broadcast channel to measure reception
         let mut rx = engine.tx.subscribe();
 
         println!("Starting Engine Benchmark: {} messages...", TOTAL_MESSAGES);
@@ -91,7 +91,7 @@ mod tests {
         println!("\n========================================");
         println!("BENCHMARK RESULTS");
         println!("========================================");
-        println!("Total Messages  : {}", received); // FIX: Using the variable
+        println!("Total Messages  : {}", received);
         println!("Time Elapsed    : {:.4}s", seconds);
         println!("Throughput      : {:.2} msgs/sec", tps);
         println!("Consumer Lagged : {} messages (Skipped)", lagged);

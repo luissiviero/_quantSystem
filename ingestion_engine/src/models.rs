@@ -14,9 +14,9 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderBook {
     pub symbol: String,
-    // Using Arc to allow O(1) cloning across threads
-    pub bids: Arc<Vec<PriceLevel>>,
-    pub asks: Arc<Vec<PriceLevel>>,
+    // Optimization: Using Arc<[T]> removes one layer of pointer indirection
+    pub bids: Arc<[PriceLevel]>,
+    pub asks: Arc<[PriceLevel]>,
     pub last_update_id: u64,
 }
 

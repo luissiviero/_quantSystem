@@ -3,7 +3,7 @@
 // @author: v5 helper
 // ingestion_engine/src/engine.rs
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque, HashSet}; // Added HashSet
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
 use crate::models::{OrderBook, Trade, AggTrade, Candle, MarketData};
@@ -19,6 +19,7 @@ pub type SharedTrades = Arc<RwLock<HashMap<String, VecDeque<Trade>>>>;
 pub type SharedAggTrades = Arc<RwLock<HashMap<String, VecDeque<AggTrade>>>>;
 pub type SharedCandles = Arc<RwLock<HashMap<String, HashMap<String, VecDeque<Candle>>>>>; 
 pub type ProcessorList = Arc<RwLock<Vec<Box<dyn DataProcessor>>>>;
+pub type ActiveIngestions = Arc<RwLock<HashSet<String>>>; // #1. New Type
 
 
 //
@@ -29,9 +30,10 @@ pub type ProcessorList = Arc<RwLock<Vec<Box<dyn DataProcessor>>>>;
 pub struct Engine {
     pub order_books: SharedOrderBook,
     pub recent_trades: SharedTrades,
-    pub recent_agg_trades: SharedAggTrades, // #1. New Storage
+    pub recent_agg_trades: SharedAggTrades,
     pub recent_candles: SharedCandles,
     pub processors: ProcessorList,
+    pub active_ingestions: ActiveIngestions, // #2. New Field
     pub tx: broadcast::Sender<(String, Arc<MarketData>)>, 
 }
 
@@ -47,9 +49,10 @@ impl Engine {
         Engine {
             order_books: Arc::new(RwLock::new(HashMap::new())),
             recent_trades: Arc::new(RwLock::new(HashMap::new())),
-            recent_agg_trades: Arc::new(RwLock::new(HashMap::new())), // #2. Initialize
+            recent_agg_trades: Arc::new(RwLock::new(HashMap::new())),
             recent_candles: Arc::new(RwLock::new(HashMap::new())),
             processors: Arc::new(RwLock::new(Vec::new())),
+            active_ingestions: Arc::new(RwLock::new(HashSet::new())), // #3. Initialize
             tx,
         }
     }
@@ -58,10 +61,19 @@ impl Engine {
     //
     // CONFIGURATION & PLUGINS
     //
-
+    
+    #[allow(dead_code)]
     pub async fn register_processor(&self, processor: Box<dyn DataProcessor>) {
         let mut processors_guard = self.processors.write().await;
         processors_guard.push(processor);
+    }
+
+    // #4. Ingestion Control Logic (Thread-Safe Check-and-Set)
+    // Returns true if the symbol was NOT present and has now been added (caller should spawn task).
+    // Returns false if the symbol was already present (caller should do nothing).
+    pub async fn request_ingestion(&self, symbol: String) -> bool {
+        let mut active_guard = self.active_ingestions.write().await;
+        active_guard.insert(symbol)
     }
 
 
@@ -107,7 +119,6 @@ impl Engine {
 
 
     pub async fn add_agg_trade(&self, symbol: String, trade: AggTrade) {
-        // #1. Update internal state
         {
             let mut trades_guard = self.recent_agg_trades.write().await;
             let trades_queue: &mut VecDeque<AggTrade> = trades_guard
@@ -120,12 +131,9 @@ impl Engine {
             }
         }
 
-        // #2. Pre-serialize
         let market_data: MarketData = MarketData::AggTrade(trade);
         if let Ok(json) = serde_json::to_string(&market_data) {
             let msg: Arc<MarketData> = Arc::new(market_data);
-            
-            // #3. Notify & Broadcast
             self.notify_processors(msg.clone()).await;
             let _ = self.tx.send((json, msg));
         }

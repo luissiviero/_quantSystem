@@ -11,6 +11,8 @@ use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 use crate::engine::Engine;
 use crate::models::{Command, CommandAction, MarketData, Trade, AggTrade, Candle};
+// Import exchanges to allow spawning new connections
+use crate::exchanges::binance; 
 
 
 //
@@ -67,16 +69,29 @@ async fn handle_connection(stream: TcpStream, engine: Engine) {
                             match cmd.action {
                                 CommandAction::Subscribe => {
                                     let symbol: String = cmd.channel.clone();
+                                    
+                                    // #1. Trigger Ingestion (Dynamic)
+                                    // If this returns true, it means we are the first to ask for it.
+                                    // We spawn the handler. If false, it's already running.
+                                    if engine.request_ingestion(symbol.clone()).await {
+                                        println!("Starting ingestion for new symbol: {}", symbol);
+                                        let engine_clone: Engine = engine.clone();
+                                        let symbol_clone: String = symbol.clone();
+                                        tokio::spawn(async move {
+                                            binance::connect_binance(symbol_clone, engine_clone).await;
+                                        });
+                                    }
+
+                                    // #2. Subscribe to internal broadcast
                                     subscribed_topics.insert(symbol.clone());
 
-                                    // #1. Send Order Book snapshot
+                                    // #3. Send Snapshots (OrderBook, Trades, etc...)
                                     if let Some(book) = engine.get_order_book(&symbol).await {
                                         if let Ok(json) = serde_json::to_string(&MarketData::OrderBook(book)) {
                                             let _ = write.send(Message::Text(json)).await;
                                         }
                                     }
 
-                                    // #2. Send Recent Trades snapshot
                                     let trades: Vec<Trade> = engine.get_recent_trades(&symbol).await;
                                     for trade in trades {
                                         if let Ok(json) = serde_json::to_string(&MarketData::Trade(trade)) {
@@ -84,7 +99,6 @@ async fn handle_connection(stream: TcpStream, engine: Engine) {
                                         }
                                     }
 
-                                    // #3. Send Recent AggTrades snapshot (New)
                                     let agg_trades: Vec<AggTrade> = engine.get_recent_agg_trades(&symbol).await;
                                     for trade in agg_trades {
                                         if let Ok(json) = serde_json::to_string(&MarketData::AggTrade(trade)) {
@@ -92,7 +106,6 @@ async fn handle_connection(stream: TcpStream, engine: Engine) {
                                         }
                                     }
 
-                                    // #4. Send Recent Candles snapshot
                                     let candles: Vec<Candle> = engine.get_recent_candles(&symbol).await;
                                     for candle in candles {
                                         if let Ok(json) = serde_json::to_string(&MarketData::Candle(candle)) {
@@ -114,15 +127,13 @@ async fn handle_connection(stream: TcpStream, engine: Engine) {
             engine_msg = engine_rx.recv() => {
                 match engine_msg {
                     Ok((json_str, data_arc)) => {
-                        // #1. Extract symbol from Arc metadata
                         let symbol: &String = match &*data_arc {
                             MarketData::OrderBook(book) => &book.symbol,
                             MarketData::Trade(trade) => &trade.symbol,
-                            MarketData::AggTrade(trade) => &trade.symbol, // Handle AggTrade
+                            MarketData::AggTrade(trade) => &trade.symbol,
                             MarketData::Candle(candle) => &candle.symbol,
                         };
 
-                        // #2. Direct string forward
                         if subscribed_topics.contains(symbol) {
                             if write.send(Message::Text(json_str)).await.is_err() {
                                 break;
