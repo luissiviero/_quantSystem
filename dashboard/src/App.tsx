@@ -1,164 +1,165 @@
-// @file: App.tsx
-// @description: Main application component with robust WebSocket reconnection logic.
-// @author: v5 helper
+/**
+ * @file: App.tsx
+ * @description: Main application entry point. Handles WebSocket connection via ConnectionStore
+ * and layout of the dashboard.
+ * @tags: #frontend #entrypoint #websocket #layout
+ */
 
-import React, { useEffect, useRef, useCallback } from 'react';
-import { useMarketStore } from './store/useMarketStore';
+import { useState, useEffect, useRef } from 'react';
 import OrderBook from './components/OrderBook';
-import RecentTrades from './components/RecentTrades';
 import PriceChart from './components/PriceChart';
-import { MarketData, DataType, Command } from './models/types';
+import RecentTrades from './components/RecentTrades';
+
+// Use the new Connection Store
+import { useConnectionStore } from './store/useConnectionStore';
 
 //
-// CONSTANTS
+// TYPES
 //
 
-const WS_URL: string = 'ws://127.0.0.1:8080';
-const RECONNECT_DELAY_MS: number = 3000;
+type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 
 //
-// COMPONENT LOGIC
+// MAIN COMPONENT
 //
 
-const App: React.FC = () => {
-  // #1. Destructure new actions for Candles and History
-  const { 
-      setOrderBook, 
-      addTrade, 
-      addCandle, 
-      prependHistory,
-      setConnected, 
-      isConnected 
-  } = useMarketStore();
+export default function App() {
+  //
+  // STATE
+  //
+
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<number | null>(null);
+  // Destructure from Connection Store
+  const { connect, disconnect, isConnected } = useConnectionStore();
+  
+  const reconnectTimeout = useRef<number | null>(null);
 
-  // 1. Define Connection Logic
-  const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
-        return;
-    }
+  //
+  // SIDE EFFECTS
+  //
 
-    console.log('Attempting connection to Ingestion Engine...');
-    const ws: WebSocket = new WebSocket(WS_URL);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      console.log('✅ Connected to Ingestion Engine');
-      setConnected(true);
-      if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-          reconnectTimeoutRef.current = null;
-      }
-      
-      const cmd: string = JSON.stringify({ action: 'subscribe', channel: 'BTCUSDT' });
-      ws.send(cmd);
-    };
-
-    ws.onclose = () => {
-      console.log('❌ Disconnected. Retrying in 3s...');
-      setConnected(false);
-      wsRef.current = null;
-      reconnectTimeoutRef.current = setTimeout(() => {
-          connect();
-      }, RECONNECT_DELAY_MS);
-    };
-
-    ws.onerror = () => { };
-
-    ws.onmessage = (event: MessageEvent) => {
-      try {
-        const payload: MarketData = JSON.parse(event.data);
-        
-        // #2. Switch on DataType to handle all incoming message types
-        switch (payload.type) {
-            case DataType.OrderBook:
-                // Cast to any to satisfy TS union discrimination in this simple switch
-                setOrderBook(payload.data as any);
-                break;
-            case DataType.Trade:
-                addTrade(payload.data as any);
-                break;
-            // FIX: Handle Live Candles
-            case DataType.Candle:
-                addCandle(payload.data as any);
-                break;
-            // FIX: Handle Bulk History (Infinite Scroll)
-            case DataType.HistoricalCandles:
-                prependHistory(payload.data as any);
-                break;
-        }
-      } catch (e) {
-        // Silently ignore parse errors
-      }
-    };
-  }, [setOrderBook, addTrade, addCandle, prependHistory, setConnected]);
-
-  // 2. Setup Effects
   useEffect(() => {
-    const connectionDelay = setTimeout(() => {
-      connect();
-    }, 100);
+    let didInitiate = false;
+    let mountTimer: number;
 
-    // #3. Setup Listener for outbound commands from Components (e.g. PriceChart)
-    const handleWsSend = (e: Event) => {
-        const customEvent = e as CustomEvent<Command>;
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-            console.log("Sending Command:", customEvent.detail);
-            wsRef.current.send(JSON.stringify(customEvent.detail));
-        }
+    const initiateConnection = () => {
+      setConnectionStatus('connecting');
+      console.log('Attempting connection to Ingestion Engine...');
+      
+      try {
+        connect();
+        didInitiate = true;
+      } catch (error) {
+        console.error('Connection failed', error);
+        setConnectionStatus('error');
+      }
     };
-    
-    window.addEventListener('ws-send', handleWsSend);
+
+    // Debounce for Strict Mode
+    mountTimer = window.setTimeout(initiateConnection, 50);
 
     return () => {
-      clearTimeout(connectionDelay);
-      window.removeEventListener('ws-send', handleWsSend); // Cleanup listener
-
-      if (wsRef.current) {
-        wsRef.current.onclose = null; 
-        wsRef.current.close();
-        wsRef.current = null;
+      window.clearTimeout(mountTimer);
+      
+      if (reconnectTimeout.current !== null) {
+        window.clearTimeout(reconnectTimeout.current);
       }
-      if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
+      
+      if (didInitiate) {
+        disconnect();
       }
     };
-  }, [connect]);
+  }, [connect, disconnect]);
 
-  // 3. Render Layout
+
+  // Monitor connection state and trigger reconnection if needed
+  useEffect(() => {
+    if (isConnected) {
+      setConnectionStatus('connected');
+      if (reconnectTimeout.current !== null) {
+        window.clearTimeout(reconnectTimeout.current);
+        reconnectTimeout.current = null;
+      }
+      return;
+    }
+
+    if (!isConnected && connectionStatus !== 'connecting') {
+      if (reconnectTimeout.current === null) {
+          reconnectTimeout.current = window.setTimeout(() => {
+            setConnectionStatus('connecting');
+            connect();
+            reconnectTimeout.current = null; 
+          }, 5000);
+      }
+    }
+  }, [isConnected, connectionStatus, connect]);
+
+  //
+  // RENDER
+  //
+
   return (
-    <div className="min-h-screen bg-gray-900 text-white p-4 lg:p-6 font-sans">
-      <header className="mb-6 flex justify-between items-center border-b border-gray-700 pb-4">
+    <div className="min-h-screen bg-gray-900 text-gray-100 p-4 font-mono">
+      {/* HEADER */}
+      <header className="mb-6 border-b border-gray-700 pb-4 flex justify-between items-center">
         <div>
-          <h1 className="text-2xl font-bold text-blue-400 tracking-tight">QuantSystem</h1>
-          <p className="text-xs text-gray-400">Institutional Grade Market Data</p>
+          <h1 className="text-2xl font-bold text-blue-400">QUANT SYSTEM v5</h1>
+          <p className="text-xs text-gray-500 mt-1">HFT DASHBOARD // PROPRIETARY</p>
         </div>
-        <div className="flex items-center gap-3 bg-gray-800 px-3 py-1.5 rounded-full border border-gray-700">
-          <span className={`h-2.5 w-2.5 rounded-full shadow-glow ${isConnected ? 'bg-green-500 shadow-green-500/50' : 'bg-red-500 shadow-red-500/50'}`}></span>
-          <span className="text-sm font-medium text-gray-300">{isConnected ? 'LIVE FEED' : 'RECONNECTING...'}</span>
+        
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-gray-400">STATUS:</span>
+            <span className={`px-2 py-1 rounded text-xs font-bold ${
+              connectionStatus === 'connected' ? 'bg-green-900 text-green-400' : 
+              connectionStatus === 'connecting' ? 'bg-yellow-900 text-yellow-400' : 
+              'bg-red-900 text-red-400'
+            }`}>
+              {connectionStatus.toUpperCase()}
+            </span>
+          </div>
         </div>
       </header>
 
-      <main className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-[calc(100vh-140px)]">
-        {/* Left: Order Book (3 cols) */}
-        <div className="lg:col-span-3 h-full overflow-hidden">
-           <OrderBook />
+      {/* MAIN GRID */}
+      <main className="grid grid-cols-12 gap-6 h-[calc(100vh-140px)]">
+        
+        {/* LEFT COLUMN: PRICE CHART */}
+        <div className="col-span-12 lg:col-span-8 bg-gray-800 rounded-lg border border-gray-700 overflow-hidden flex flex-col">
+          <div className="p-3 bg-gray-800 border-b border-gray-700 flex justify-between items-center">
+            <h2 className="text-sm font-semibold text-gray-300">BTC/USDT PRICE ACTION</h2>
+          </div>
+          <div className="flex-1 relative">
+            <PriceChart />
+          </div>
         </div>
 
-        {/* Center: Chart (6 cols) */}
-        <div className="lg:col-span-6 h-full flex flex-col gap-4 overflow-hidden">
-           <PriceChart />
-        </div>
+        {/* RIGHT COLUMN: DATA FEEDS */}
+        <div className="col-span-12 lg:col-span-4 flex flex-col gap-6 h-full">
+          
+          {/* ORDER BOOK */}
+          <div className="flex-1 bg-gray-800 rounded-lg border border-gray-700 overflow-hidden flex flex-col">
+            <div className="p-3 bg-gray-800 border-b border-gray-700">
+              <h2 className="text-sm font-semibold text-gray-300">ORDER BOOK</h2>
+            </div>
+            <div className="flex-1 overflow-auto">
+              <OrderBook />
+            </div>
+          </div>
 
-        {/* Right: Recent Trades (3 cols) */}
-        <div className="lg:col-span-3 h-full overflow-hidden">
-           <RecentTrades />
+          {/* RECENT TRADES */}
+          <div className="flex-1 bg-gray-800 rounded-lg border border-gray-700 overflow-hidden flex flex-col">
+            <div className="p-3 bg-gray-800 border-b border-gray-700">
+              <h2 className="text-sm font-semibold text-gray-300">RECENT TRADES</h2>
+            </div>
+            <div className="flex-1 overflow-auto">
+              <RecentTrades />
+            </div>
+          </div>
+
         </div>
       </main>
     </div>
   );
-};
-
-export default App;
+}

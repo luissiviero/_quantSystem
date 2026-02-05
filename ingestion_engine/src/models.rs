@@ -1,10 +1,43 @@
 // @file: models.rs
-// @description: Centralized data structures for the ingestion engine using Arc and strict types.
+// @description: Centralized data structures including granular StreamConfig.
 // @author: v5 helper
 // ingestion_engine/src/models.rs
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+
+//
+// CONFIGURATION
+//
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamConfig {
+    pub raw_trades: bool,
+    pub agg_trades: bool,
+    pub order_book: bool,
+    // Changed from 'klines: bool' to specific intervals
+    pub kline_intervals: Vec<String>, 
+}
+
+impl Default for StreamConfig {
+    fn default() -> Self {
+        Self {
+            raw_trades: true,
+            agg_trades: true,
+            order_book: true,
+            // Default to common intervals
+            kline_intervals: vec![
+                "1m".to_string(), 
+                "5m".to_string(), 
+                "15m".to_string(), 
+                "1h".to_string(), 
+                "4h".to_string(), 
+                "1d".to_string()
+            ],
+        }
+    }
+}
 
 
 //
@@ -89,7 +122,6 @@ pub enum MarketData {
     Trade(Trade),
     AggTrade(AggTrade),
     Candle(Candle),
-    // #1. New Variant for Bulk History
     HistoricalCandles(Vec<Candle>), 
 }
 
@@ -98,7 +130,6 @@ pub enum MarketData {
 pub enum CommandAction {
     Subscribe,
     Unsubscribe,
-    // #2. New Action
     FetchHistory, 
 }
 
@@ -106,6 +137,7 @@ pub enum CommandAction {
 pub struct Command {
     pub action: CommandAction,
     pub channel: String,
-    // #3. Optional Cursor for pagination (Time in ms)
-    pub end_time: Option<u64>, 
+    pub end_time: Option<u64>,
+    // Optional Config from Frontend
+    pub config: Option<StreamConfig>, 
 }

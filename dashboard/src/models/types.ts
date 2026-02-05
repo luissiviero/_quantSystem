@@ -11,7 +11,7 @@ export enum DataType {
   Trade = "Trade",
   AggTrade = "AggTrade",
   Candle = "Candle",
-  HistoricalCandles = "HistoricalCandles" // #1. New Type
+  HistoricalCandles = "HistoricalCandles" 
 }
 
 export enum TradeSide {
@@ -22,6 +22,13 @@ export enum TradeSide {
 //
 // ENTITIES
 //
+
+export interface StreamConfig {
+  raw_trades: boolean;
+  agg_trades: boolean;
+  order_book: boolean;
+  kline_intervals: string[];
+}
 
 export interface PriceLevel {
   price: number;
@@ -44,6 +51,17 @@ export interface Trade {
   side: TradeSide;
 }
 
+export interface AggTrade {
+  id: number;
+  symbol: string;
+  price: number;
+  quantity: number;
+  timestamp_ms: number;
+  side: TradeSide;
+  first_trade_id: number;
+  last_trade_id: number;
+}
+
 export interface Candle {
   symbol: string;
   interval: string;
@@ -63,11 +81,12 @@ export interface Candle {
 
 export interface MarketData {
   type: DataType;
-  data: OrderBook | Trade | Candle | Candle[]; // #2. Union Type
+  data: OrderBook | Trade | AggTrade | Candle | Candle[]; 
 }
 
 export interface Command {
   action: 'subscribe' | 'unsubscribe' | 'fetch_history';
   channel: string;
   end_time?: number;
+  config?: StreamConfig; // Added config to match backend
 }

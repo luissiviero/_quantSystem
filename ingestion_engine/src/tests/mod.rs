@@ -6,6 +6,7 @@
 // internal modules
 //
 
-//pub mod engine_bench;
+// pub mod engine_bench;
 // pub mod frontend_simulator;
-pub mod logger_processor;
+pub mod latency;
+// pub mod log_tester;

@@ -1,5 +1,5 @@
 // @file: server.rs
-// @description: WebSocket server utilizing pre-serialized data streams for O(1) broadcast complexity.
+// @description: WebSocket server handling client commands and config extraction.
 // @author: v5 helper
 // ingestion_engine/src/server.rs
 
@@ -10,21 +10,12 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 use crate::engine::Engine;
-use crate::models::{Command, CommandAction, MarketData, Trade, AggTrade, Candle};
-// Import exchanges to allow spawning new connections
+use crate::models::{Command, CommandAction, MarketData}; 
 use crate::exchanges::binance; 
 
 
-//
-// CONSTANTS
-//
-
 const SERVER_ADDR: &str = "127.0.0.1:8080";
 
-
-//
-// SERVER ENTRY POINT
-//
 
 pub async fn start_server(engine: Engine) {
     let addr: SocketAddr = SERVER_ADDR.parse().expect("Invalid address");
@@ -38,10 +29,6 @@ pub async fn start_server(engine: Engine) {
     }
 }
 
-
-//
-// CONNECTION HANDLER
-//
 
 async fn handle_connection(stream: TcpStream, engine: Engine) {
     let ws_stream = match accept_async(stream).await {
@@ -58,75 +45,63 @@ async fn handle_connection(stream: TcpStream, engine: Engine) {
 
     println!("New client connected");
 
-    // #1. Main Event Loop
     loop {
         tokio::select! {
-            // Case A: Client Commands
             client_msg = read.next() => {
                 match client_msg {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(cmd) = serde_json::from_str::<Command>(&text) {
                             match cmd.action {
                                 CommandAction::Subscribe => {
-                                    let symbol: String = cmd.channel.clone();
+                                    let symbol = cmd.channel.clone();
                                     
-                                    // #1. Trigger Ingestion (Dynamic)
                                     if engine.request_ingestion(symbol.clone()).await {
                                         println!("Starting ingestion for new symbol: {}", symbol);
-                                        let engine_clone: Engine = engine.clone();
-                                        let symbol_clone: String = symbol.clone();
+                                        let engine_clone = engine.clone();
+                                        let symbol_clone = symbol.clone();
+                                        
+                                        // Config from Frontend
+                                        let config = cmd.config.unwrap_or_default();
+                                        
                                         tokio::spawn(async move {
-                                            binance::connect_binance(symbol_clone, engine_clone).await;
+                                            binance::connect_binance(symbol_clone, engine_clone, config).await;
                                         });
                                     }
 
-                                    // #2. Subscribe to internal broadcast
                                     subscribed_topics.insert(symbol.clone());
 
-                                    // #3. Send Snapshots (The Fix for Unused Warnings)
-                                    
-                                    // A. OrderBook
+                                    // Send Snapshots
                                     if let Some(book) = engine.get_order_book(&symbol).await {
                                         if let Ok(json) = serde_json::to_string(&MarketData::OrderBook(book)) {
                                             let _ = write.send(Message::Text(json)).await;
                                         }
                                     }
 
-                                    // B. Recent Trades
-                                    let trades: Vec<Trade> = engine.get_recent_trades(&symbol).await;
+                                    let trades = engine.get_recent_trades(&symbol).await;
                                     for trade in trades {
                                         if let Ok(json) = serde_json::to_string(&MarketData::Trade(trade)) {
                                             let _ = write.send(Message::Text(json)).await;
                                         }
                                     }
 
-                                    // C. AggTrades (Fixes unused AggTrade warning)
-                                    let agg_trades: Vec<AggTrade> = engine.get_recent_agg_trades(&symbol).await;
+                                    let agg_trades = engine.get_recent_agg_trades(&symbol).await;
                                     for trade in agg_trades {
                                         if let Ok(json) = serde_json::to_string(&MarketData::AggTrade(trade)) {
                                             let _ = write.send(Message::Text(json)).await;
                                         }
                                     }
 
-                                    // D. Recent Candles (Fixes unused Candle warning)
-                                    // Note: This sends the small "recent" buffer (e.g., last 100)
-                                    let candles: Vec<Candle> = engine.get_recent_candles(&symbol).await;
+                                    let candles = engine.get_recent_candles(&symbol).await;
                                     for candle in candles {
                                         if let Ok(json) = serde_json::to_string(&MarketData::Candle(candle)) {
                                             let _ = write.send(Message::Text(json)).await;
                                         }
                                     }
                                     
-                                    // E. Historical History (Infinite Scroll Initial Load)
-                                    // We fetch a larger block (e.g. 1000) for the chart
-                                    let now = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap()
-                                        .as_millis() as u64;
-                                        
+                                    // Historical History
+                                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
                                     let initial_history = engine.get_history(&symbol, now, 1000).await;
                                     if !initial_history.is_empty() {
-                                        // Send as bulk history packet
                                         if let Ok(json) = serde_json::to_string(&MarketData::HistoricalCandles(initial_history)) {
                                             let _ = write.send(Message::Text(json)).await;
                                         }
@@ -135,19 +110,13 @@ async fn handle_connection(stream: TcpStream, engine: Engine) {
                                 CommandAction::Unsubscribe => {
                                     subscribed_topics.remove(&cmd.channel);
                                 }
-                                // Handle Infinite Scroll Requests
                                 CommandAction::FetchHistory => {
                                     let symbol = cmd.channel.clone();
                                     let end_time = cmd.end_time.unwrap_or_else(|| {
-                                        std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .unwrap()
-                                            .as_millis() as u64
+                                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
                                     });
 
-                                    println!("Serving history for {} before {}", symbol, end_time);
                                     let history = engine.get_history(&symbol, end_time, 1000).await;
-                                    
                                     if let Ok(json) = serde_json::to_string(&MarketData::HistoricalCandles(history)) {
                                         let _ = write.send(Message::Text(json)).await;
                                     }
@@ -159,7 +128,6 @@ async fn handle_connection(stream: TcpStream, engine: Engine) {
                 }
             }
 
-            // Case B: Engine Broadcasts
             engine_msg = engine_rx.recv() => {
                 match engine_msg {
                     Ok((json_str, data_arc)) => {
@@ -168,7 +136,6 @@ async fn handle_connection(stream: TcpStream, engine: Engine) {
                             MarketData::Trade(trade) => &trade.symbol,
                             MarketData::AggTrade(trade) => &trade.symbol,
                             MarketData::Candle(candle) => &candle.symbol,
-                            // Do not broadcast historical packets to all subscribers
                             MarketData::HistoricalCandles(_) => continue, 
                         };
 
@@ -177,9 +144,6 @@ async fn handle_connection(stream: TcpStream, engine: Engine) {
                                 break;
                             }
                         }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        continue;
                     }
                     Err(_) => break,
                 }

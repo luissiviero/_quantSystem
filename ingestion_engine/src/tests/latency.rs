@@ -3,7 +3,7 @@
 // @author: v5 helper
 
 use crate::interfaces::DataProcessor;
-use crate::models::MarketData;
+use crate::models::{MarketData, StreamConfig}; // #1. Added StreamConfig import
 use crate::engine::Engine;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -21,17 +21,13 @@ use serde::Deserialize;
 #[derive(Deserialize, Debug)]
 struct Ticker24hr {
     symbol: String,
-    // FIX: Snake case compliance + Serde rename
     #[serde(rename = "quoteVolume")]
     quote_volume: String, 
 }
 
-// FIX: Changed to 'async fn' to avoid blocking the Tokio test runtime
 async fn fetch_top_volume_symbols(limit: usize) -> Vec<String> {
     println!(">> Fetching top {} symbols by volume from Binance API...", limit);
     
-    // 1. Fetch Data (Async Client)
-    // We use the async client to reuse the existing runtime instead of spinning up a blocking one
     let client = reqwest::Client::new();
     let resp = client.get("https://api.binance.com/api/v3/ticker/24hr")
         .send()
@@ -40,16 +36,13 @@ async fn fetch_top_volume_symbols(limit: usize) -> Vec<String> {
     
     let tickers: Vec<Ticker24hr> = resp.json().await.expect("Failed to parse JSON");
 
-    // 2. Filter & Sort
     let mut usdt_pairs: Vec<(String, f64)> = tickers.into_iter()
         .filter(|t| t.symbol.ends_with("USDT"))
         .map(|t| (t.symbol, t.quote_volume.parse::<f64>().unwrap_or(0.0)))
         .collect();
 
-    // Sort descending by volume
     usdt_pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-    // 3. Extract Top N
     let top_symbols: Vec<String> = usdt_pairs.into_iter()
         .take(limit)
         .map(|(sym, _)| sym)
@@ -65,32 +58,20 @@ async fn fetch_top_volume_symbols(limit: usize) -> Vec<String> {
 
 #[derive(Debug)]
 struct DashboardState {
-    // Metadata
     scenario_title: String,
     start_time_ms: u128,
-
-    // Rendering State
     lines_printed_previously: usize,
-
     last_trade_str: String,
-    
-    // Integrity & Performance Metrics
     trade_count: u64,
     previous_trade_ids: HashMap<String, u64>,
     gap_count: u64,
-    
-    // Latency Metrics
     min_raw_delta: i64,      
     is_baseline_set: bool,
     accumulated_jitter: i64, 
-    
-    // Burst Detection
     burst_count: u64,
     current_burst_depth: u64,
     max_burst_depth: u64,
     last_process_ms: u128,
-
-    // UI Throttling
     last_ui_update_ms: u128,
 }
 
@@ -180,7 +161,6 @@ impl DataProcessor for LogProcessor {
         let should_redraw = {
             let mut state = self.state.lock().unwrap();
 
-            // Burst Logic
             if now_ms == state.last_process_ms {
                 state.current_burst_depth += 1;
                 if state.current_burst_depth > state.max_burst_depth {
@@ -206,7 +186,6 @@ impl DataProcessor for LogProcessor {
                     let jitter = raw_diff - state.min_raw_delta;
                     state.accumulated_jitter += jitter;
 
-                    // FIX: Double-borrow check
                     let is_gap = {
                         let last_id = state.previous_trade_ids.entry(t.symbol.clone()).or_insert(0);
                         let gap_detected = *last_id != 0 && t.id != *last_id + 1;
@@ -242,7 +221,6 @@ impl DataProcessor for LogProcessor {
     }
 
     fn on_error(&self, _error: String) {
-        // Suppress errors during tests
     }
 }
 
@@ -251,7 +229,7 @@ impl DataProcessor for LogProcessor {
 //
 
 async fn run_scenario(title: &str, symbols: Vec<String>, use_pinned: bool) {
-    println!("Successfully connected to Binance"); // Single simulated print
+    println!("Successfully connected to Binance"); 
     
     let engine = Engine::new();
     let active_flag = Arc::new(AtomicBool::new(true));
@@ -263,6 +241,9 @@ async fn run_scenario(title: &str, symbols: Vec<String>, use_pinned: bool) {
             let engine_clone = engine.clone();
             let symbol_clone = symbol.clone();
 
+            // #2. Create Config for Test (Default: All streams)
+            let config = StreamConfig::default();
+
             if use_pinned {
                 std::thread::Builder::new()
                     .name(format!("worker-{}", symbol_clone))
@@ -273,13 +254,15 @@ async fn run_scenario(title: &str, symbols: Vec<String>, use_pinned: bool) {
                             .expect("Failed to build dedicated runtime");
                         
                         rt.block_on(async move {
-                             crate::exchanges::binance::connect_binance(symbol_clone, engine_clone).await;
+                             // #3. Pass Config here
+                             crate::exchanges::binance::connect_binance(symbol_clone, engine_clone, config).await;
                         });
                     })
                     .expect("Failed to spawn pinned thread");
             } else {
                 tokio::spawn(async move {
-                    crate::exchanges::binance::connect_binance(symbol_clone, engine_clone).await;
+                    // #4. Pass Config here
+                    crate::exchanges::binance::connect_binance(symbol_clone, engine_clone, config).await;
                 });
             }
             
@@ -302,8 +285,7 @@ async fn run_scenario(title: &str, symbols: Vec<String>, use_pinned: bool) {
 async fn test_binance_stream() {
     let single_symbol = vec!["BTCUSDT".to_string()];
     
-    // DYNAMIC FETCH (Awaited)
-    let top_x_symbols = fetch_top_volume_symbols(50).await;
+    let top_x_symbols = fetch_top_volume_symbols(100).await;
 
     print!("\x1b[2J\x1b[H"); 
 

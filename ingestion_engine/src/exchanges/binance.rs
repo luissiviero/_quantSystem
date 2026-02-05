@@ -1,5 +1,5 @@
 // @file: binance.rs
-// @description: Handles WebSocket connections for Binance with generic interval parsing.
+// @description: Binance connector with granular stream subscription and AggTrade parsing restored.
 // @author: v5 helper
 // ingestion_engine/src/exchanges/binance.rs
 
@@ -7,26 +7,19 @@ use futures_util::StreamExt;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use serde::{Deserialize};
 use crate::engine::Engine;
-use crate::models::{OrderBook, PriceLevel, Trade, AggTrade, TradeSide, Candle};
+use crate::models::{OrderBook, PriceLevel, Trade, AggTrade, TradeSide, Candle, StreamConfig};
 use url::Url;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
 
-//
-// CONSTANTS
-//
-
 const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/ws";
-const MAX_BACKOFF_SECONDS: u64 = 60;
-const KLINE_INTERVALS: [&str; 6] = ["1m", "5m", "15m", "1h", "4h", "1d"]; 
 
 
 //
 // BINANCE-SPECIFIC WIRE MODELS
 //
 
-// last trades
 #[derive(Deserialize)]
 struct BinanceTradeEvent {
     #[serde(rename = "t")] id: u64,
@@ -37,7 +30,6 @@ struct BinanceTradeEvent {
     #[serde(rename = "m")] is_buyer_maker: bool,
 }
 
-// agg trades
 #[derive(Deserialize)]
 struct BinanceAggTradeEvent {
     #[serde(rename = "a")] id: u64,
@@ -50,7 +42,6 @@ struct BinanceAggTradeEvent {
     #[serde(rename = "l")] last_trade_id: u64,
 }
 
-// order book
 #[derive(Deserialize)]
 struct BinanceDepthEvent {
     #[serde(rename = "lastUpdateId")] last_update_id: u64,
@@ -58,7 +49,6 @@ struct BinanceDepthEvent {
     asks: Vec<[String; 2]>,
 }
 
-// klines
 #[derive(Deserialize)]
 struct BinanceKlineEvent {
     #[serde(rename = "s")] symbol: String,
@@ -83,137 +73,110 @@ struct BinanceKlineData {
 // CONNECTION LOGIC
 //
 
-pub async fn connect_binance(symbol: String, engine: Engine) {
+pub async fn connect_binance(symbol: String, engine: Engine, config: StreamConfig) {
     let mut backoff_seconds: u64 = 1;
 
-    // #1. Start infinite reconnection loop
     loop {
-        let s_lower: String = symbol.to_lowercase();
-        
-        // #2. Dynamic URL construction
-        let mut streams: Vec<String> = vec![
-            format!("{}@depth20", s_lower),
-            format!("{}@trade", s_lower),
-            format!("{}@aggTrade", s_lower), // Added aggTrade stream
-        ];
+        let s_lower = symbol.to_lowercase();
+        let mut streams = Vec::with_capacity(10); 
 
-        // Automatically add all configured intervals
-        for interval in KLINE_INTERVALS {
+        if config.order_book {
+            streams.push(format!("{}@depth20", s_lower));
+        }
+        if config.raw_trades {
+            streams.push(format!("{}@trade", s_lower));
+        }
+        if config.agg_trades {
+            streams.push(format!("{}@aggTrade", s_lower));
+        }
+
+        // Dynamic Interval Subscription from Config
+        for interval in &config.kline_intervals {
             streams.push(format!("{}@kline_{}", s_lower, interval));
         }
 
-        let stream_string: String = streams.join("/");
-        let url_str: String = format!("{}/{}", BINANCE_WS_URL, stream_string);
-        let url: Url = Url::parse(&url_str).expect("Bad URL structure");
+        if streams.is_empty() {
+            eprintln!("Error: No streams enabled for {}. Aborting connection.", symbol);
+            return;
+        }
 
-        // FIX: Conditional compilation to hide logs during 'cargo test'
-        #[cfg(not(test))]
-        println!("Connecting to Binance: {}", url);
+        let url = Url::parse(&format!("{}/{}", BINANCE_WS_URL, streams.join("/"))).unwrap();
 
         match connect_async(url).await {
             Ok((ws_stream, _)) => {
-                // FIX: Conditional compilation to hide logs during 'cargo test'
-                #[cfg(not(test))]
-                println!("Successfully connected to Binance for {}", symbol);
-                
                 backoff_seconds = 1;
                 let (_, mut read) = ws_stream.split();
 
-                // #3. Process incoming messages
-                while let Some(msg) = read.next().await {
-                    match msg {
-                        Ok(Message::Text(text)) => {
-                            if let Err(e) = handle_message(&symbol, &text, &engine).await {
-                                eprintln!("Error handling message: {}", e);
-                            }
-                        }
-                        Ok(Message::Close(frame)) => {
-                            eprintln!("Binance closed connection: {:?}", frame);
-                            break;
-                        }
-                        Err(e) => {
-                            eprintln!("Websocket error: {}", e);
-                            break; 
-                        }
-                        _ => {} 
-                    }
+                while let Some(Ok(Message::Text(text))) = read.next().await {
+                    let engine_handle = engine.clone();
+                    let sym = symbol.clone();
+                    tokio::spawn(async move {
+                        let _ = handle_message(&sym, &text, &engine_handle).await;
+                    });
                 }
             }
-            Err(e) => {
-                eprintln!("Failed to connect to Binance: {}. Retrying in {}s...", e, backoff_seconds);
-            }
+            Err(_) => sleep(Duration::from_secs(backoff_seconds)).await,
         }
-
-        // #4. Exponential Backoff Logic
-        sleep(Duration::from_secs(backoff_seconds)).await;
-        backoff_seconds = std::cmp::min(backoff_seconds * 2, MAX_BACKOFF_SECONDS);
+        backoff_seconds = std::cmp::min(backoff_seconds * 2, 60);
     }
 }
 
 
 //
-// MESSAGE ROUTING & PARSING
+// MESSAGE HANDLER
 //
 
 async fn handle_message(symbol: &str, text: &str, engine: &Engine) -> Result<(), serde_json::Error> {
     if text.contains("\"e\":\"trade\"") {
         let ev: BinanceTradeEvent = serde_json::from_str(text)?;
-        let trade: Trade = Trade {
+        engine.add_trade(symbol.to_string(), Trade {
             id: ev.id,
             symbol: ev.symbol,
-            price: ev.price.parse::<f64>().unwrap_or(0.0),
-            quantity: ev.quantity.parse::<f64>().unwrap_or(0.0),
+            price: ev.price.parse().unwrap_or(0.0),
+            quantity: ev.quantity.parse().unwrap_or(0.0),
             timestamp_ms: ev.timestamp,
             side: if ev.is_buyer_maker { TradeSide::Sell } else { TradeSide::Buy },
-        };
-        engine.add_trade(symbol.to_string(), trade).await;
+        }).await;
+
+    } else if text.contains("\"bids\"") {
+        let ev: BinanceDepthEvent = serde_json::from_str(text)?;
+        engine.update_order_book(symbol.to_string(), OrderBook {
+            symbol: symbol.to_string(),
+            bids: Arc::from(parse_raw_levels(&ev.bids)),
+            asks: Arc::from(parse_raw_levels(&ev.asks)),
+            last_update_id: ev.last_update_id,
+        }).await;
+
+    } else if text.contains("\"e\":\"kline\"") {
+        let ev: BinanceKlineEvent = serde_json::from_str(text)?;
+        let k = ev.kline;
+        engine.add_candle(symbol.to_string(), Candle {
+            symbol: ev.symbol,
+            interval: k.interval,
+            open: k.open.parse().unwrap_or(0.0),
+            high: k.high.parse().unwrap_or(0.0),
+            low: k.low.parse().unwrap_or(0.0),
+            close: k.close.parse().unwrap_or(0.0),
+            volume: k.volume.parse().unwrap_or(0.0),
+            start_time: k.start_time,
+            close_time: k.close_time,
+            is_closed: k.is_closed,
+        }).await;
 
     } else if text.contains("\"e\":\"aggTrade\"") {
         let ev: BinanceAggTradeEvent = serde_json::from_str(text)?;
-        let agg_trade: AggTrade = AggTrade {
+        engine.add_agg_trade(symbol.to_string(), AggTrade {
             id: ev.id,
             symbol: ev.symbol,
-            price: ev.price.parse::<f64>().unwrap_or(0.0),
-            quantity: ev.quantity.parse::<f64>().unwrap_or(0.0),
+            price: ev.price.parse().unwrap_or(0.0),
+            quantity: ev.quantity.parse().unwrap_or(0.0),
             timestamp_ms: ev.timestamp,
             side: if ev.is_buyer_maker { TradeSide::Sell } else { TradeSide::Buy },
             first_trade_id: ev.first_trade_id,
             last_trade_id: ev.last_trade_id,
-        };
-        engine.add_agg_trade(symbol.to_string(), agg_trade).await;
-
-    } else if text.contains("\"bids\"") {
-        let ev: BinanceDepthEvent = serde_json::from_str(text)?;
-        let bids: Vec<PriceLevel> = parse_raw_levels(&ev.bids);
-        let asks: Vec<PriceLevel> = parse_raw_levels(&ev.asks);
-        let book: OrderBook = OrderBook {
-            symbol: symbol.to_string(),
-            bids: Arc::from(bids),
-            asks: Arc::from(asks),
-            last_update_id: ev.last_update_id,
-        };
-        engine.update_order_book(symbol.to_string(), book).await;
-
-    } else if text.contains("\"e\":\"kline\"") {
-        let ev: BinanceKlineEvent = serde_json::from_str(text)?;
-        let k: BinanceKlineData = ev.kline;
-        
-        // #3. Generic Construction
-        let candle: Candle = Candle {
-            symbol: ev.symbol,
-            interval: k.interval,
-            open: k.open.parse::<f64>().unwrap_or(0.0),
-            high: k.high.parse::<f64>().unwrap_or(0.0),
-            low: k.low.parse::<f64>().unwrap_or(0.0),
-            close: k.close.parse::<f64>().unwrap_or(0.0),
-            volume: k.volume.parse::<f64>().unwrap_or(0.0),
-            start_time: k.start_time,
-            close_time: k.close_time,
-            is_closed: k.is_closed,
-        };
-        engine.add_candle(symbol.to_string(), candle).await;
+        }).await;
     }
-
+    
     Ok(())
 }
 
@@ -221,8 +184,8 @@ async fn handle_message(symbol: &str, text: &str, engine: &Engine) -> Result<(),
 fn parse_raw_levels(raw: &[[String; 2]]) -> Vec<PriceLevel> {
     raw.iter()
         .map(|item| PriceLevel {
-            price: item[0].parse::<f64>().unwrap_or(0.0),
-            quantity: item[1].parse::<f64>().unwrap_or(0.0),
+            price: item[0].parse().unwrap_or(0.0),
+            quantity: item[1].parse().unwrap_or(0.0),
         })
         .collect()
 }

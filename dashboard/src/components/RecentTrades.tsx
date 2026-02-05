@@ -3,7 +3,7 @@
 // @author: v5 helper
 
 import React from 'react';
-import { useMarketStore } from '../store/useMarketStore';
+import { useTradeStore } from '../store/useTradeStore';
 import { Trade, TradeSide } from '../models/types';
 
 //
@@ -11,7 +11,8 @@ import { Trade, TradeSide } from '../models/types';
 //
 
 const RecentTrades: React.FC = () => {
-  const { recentTrades } = useMarketStore();
+  // 1. Select data from specific store
+  const { recentTrades } = useTradeStore();
 
   const formatTime = (timestamp: number): string => {
     return new Date(timestamp).toLocaleTimeString();
@@ -35,12 +36,9 @@ const RecentTrades: React.FC = () => {
         {recentTrades.length === 0 ? (
           <p className="text-gray-500 text-center text-sm mt-4">Waiting for trades...</p>
         ) : (
-          // FIX: Slice the large history array to only show the last 50 items in the UI list
           recentTrades.slice(0, 50).map((trade: Trade, index: number) => {
-            // Guard clause for safety in case of bad data
             if (!trade) return null;
 
-            // FIX: Use 'side' property instead of 'is_buyer_maker'
             const isSell: boolean = trade.side === TradeSide.Sell;
             const colorClass: string = isSell ? 'text-red-400' : 'text-green-400';
 
