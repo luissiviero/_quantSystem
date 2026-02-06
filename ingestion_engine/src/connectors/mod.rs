@@ -2,4 +2,4 @@
 // @description: Exports external exchange connectors.
 // @author: LAS.
 
-pub mod binance_spot;
+pub mod binance;

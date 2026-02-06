@@ -1,9 +1,10 @@
 // @file: ingestion_engine/src/tests/latency.rs
 // @description: Optimized Latency Test. Decouples UI rendering from data processing to ensure zero-cost observation.
 // @author: LAS.
+#![allow(dead_code)] // Suppress "unused" warnings during normal builds (helper functions are only used in #[test])
 
 use crate::core::interfaces::DataProcessor;
-use crate::core::models::{MarketData, StreamConfig}; 
+use crate::core::models::{MarketData}; 
 use crate::core::engine::Engine;
 use crate::utils::config::AppConfig;
 use async_trait::async_trait;
@@ -76,7 +77,7 @@ async fn get_clock_offset_ms() -> i64 {
 
 
 //
-// 2. LOCK-FREE SHARED STATS
+// 2. LOCK-FREE SHARED STATS & RESULTS
 //
 
 struct TestStats {
@@ -86,6 +87,16 @@ struct TestStats {
     burst_count: AtomicU64,
     // We use a mutex only for non-critical, infrequent UI strings
     last_trade_info: Mutex<String>,
+}
+
+// Added struct to hold results for final comparison
+#[derive(Debug, Clone)]
+struct ScenarioResult {
+    title: String,
+    avg_latency: f64,
+    gaps: u64,
+    total_trades: u64,
+    tps: f64,
 }
 
 impl TestStats {
@@ -105,7 +116,7 @@ impl TestStats {
 // 3. OPTIMIZED PROCESSOR
 //
 
-pub struct LatencyProcessor {
+struct LatencyProcessor {
     stats: Arc<TestStats>,
     // Map Symbol -> Last Trade ID. Uses RwLock for better read concurrency,
     // though writes (updates) are frequent.
@@ -120,7 +131,7 @@ pub struct LatencyProcessor {
 }
 
 impl LatencyProcessor {
-    pub fn new(stats: Arc<TestStats>, clock_offset: i64) -> Self {
+    fn new(stats: Arc<TestStats>, clock_offset: i64) -> Self {
         Self {
             stats,
             last_ids: RwLock::new(HashMap::new()),
@@ -235,8 +246,13 @@ async fn run_monitor(stats: Arc<TestStats>, title: String, active: Arc<AtomicBoo
 // 5. SCENARIO RUNNER
 //
 
-async fn run_scenario(title: &str, symbols: Vec<String>, use_pinned: bool) {
+// UPDATED: Now accepts enable_ui flag to silence output during concurrent runs
+async fn run_scenario(title: &str, symbols: Vec<String>, use_pinned: bool, enable_ui: bool) -> ScenarioResult {
+    // Only perform clock sync if UI is enabled (otherwise rely on pre-synced time or minimal output)
+    // Actually, we need accurate latency calc, so we must sync or pass offset. 
+    // For simplicity, we fetch it here. In concurrent mode, both will fetch, which is fine.
     let offset = get_clock_offset_ms().await;
+    let start_time = SystemTime::now();
     
     let stats = Arc::new(TestStats::new());
     let active = Arc::new(AtomicBool::new(true));
@@ -265,11 +281,16 @@ async fn run_scenario(title: &str, symbols: Vec<String>, use_pinned: bool) {
     let processor = Box::new(LatencyProcessor::new(stats.clone(), offset));
     engine.register_processor(processor).await;
 
-    // Spawn Monitor separately
+    // Spawn Monitor separately ONLY if UI is enabled
     let mon_stats = stats.clone();
     let mon_title = title.to_string();
     let mon_active = active.clone();
-    tokio::spawn(run_monitor(mon_stats, mon_title, mon_active));
+    
+    if enable_ui {
+        tokio::spawn(run_monitor(mon_stats, mon_title, mon_active));
+    } else {
+        println!("   -> Started background scenario: '{}'", title);
+    }
 
     // Spawn Connections
     for symbol in symbols {
@@ -283,12 +304,12 @@ async fn run_scenario(title: &str, symbols: Vec<String>, use_pinned: bool) {
                 std::thread::Builder::new().name(format!("w-{}", sym)).spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
                     rt.block_on(async move {
-                         crate::connectors::binance_spot::connect_binance(sym, engine_clone, stream_cfg, cfg).await;
+                         crate::connectors::binance::connect_binance(sym, engine_clone, stream_cfg, cfg).await;
                     });
                 }).unwrap();
             } else {
                 tokio::spawn(async move {
-                    crate::connectors::binance_spot::connect_binance(sym, engine_clone, stream_cfg, cfg).await;
+                    crate::connectors::binance::connect_binance(sym, engine_clone, stream_cfg, cfg).await;
                 });
             }
             if use_pinned { sleep(Duration::from_millis(5)).await; }
@@ -298,7 +319,44 @@ async fn run_scenario(title: &str, symbols: Vec<String>, use_pinned: bool) {
     sleep(Duration::from_secs(15)).await;
     active.store(false, Ordering::Relaxed);
     sleep(Duration::from_secs(1)).await; // Allow monitor to finish
-    println!("\n");
+    
+    if enable_ui {
+        println!("\n");
+    }
+
+    // Capture Final Stats
+    let total_trades = stats.trade_count.load(Ordering::Relaxed);
+    let total_jitter = stats.accumulated_jitter.load(Ordering::Relaxed);
+    let avg_latency = if total_trades > 0 { total_jitter as f64 / total_trades as f64 } else { 0.0 };
+    let gaps = stats.gap_count.load(Ordering::Relaxed);
+    let duration_secs = start_time.elapsed().unwrap_or(Duration::from_secs(15)).as_secs_f64();
+
+    ScenarioResult {
+        title: title.to_string(),
+        avg_latency,
+        gaps,
+        total_trades,
+        tps: total_trades as f64 / duration_secs,
+    }
+}
+
+// Helper to print side-by-side comparison
+fn print_comparison(title: &str, standard: &ScenarioResult, pinned: &ScenarioResult) {
+    println!("\n=======================================================");
+    println!(" COMPARISON: {}", title);
+    println!("=======================================================");
+    println!(" Metric          | {:<15} | {:<15}", "Standard", "Pinned");
+    println!("-----------------|-----------------|-----------------");
+    println!(" Avg Latency     | {:<10.2} ms    | {:<10.2} ms", standard.avg_latency, pinned.avg_latency);
+    println!(" Gaps Detected   | {:<15} | {:<15}", standard.gaps, pinned.gaps);
+    println!(" Trades (Vol)    | {:<15} | {:<15}", standard.total_trades, pinned.total_trades);
+    println!(" Est. TPS        | {:<10.2}      | {:<10.2}", standard.tps, pinned.tps);
+    println!("=======================================================");
+    
+    let winner = if pinned.avg_latency < standard.avg_latency { "Pinned" } else { "Standard" };
+    let diff = (standard.avg_latency - pinned.avg_latency).abs();
+    println!(" >> WINNER: {} (by {:.2} ms)", winner, diff);
+    println!("=======================================================\n");
 }
 
 
@@ -308,17 +366,49 @@ async fn run_scenario(title: &str, symbols: Vec<String>, use_pinned: bool) {
 
 #[tokio::test]
 async fn test_latency_suite() {
+    // --- CONFIGURATION ---
+    const CONCURRENT_MODE: bool = true; // Set to TRUE to run comparisons simultaneously
+    let symbol_count = 50; 
+    // ---------------------
+
     let single = vec!["BTCUSDT".to_string()];
-    let top_50 = fetch_top_volume_symbols(50).await;
+    let top_n_symbols = fetch_top_volume_symbols(symbol_count).await;
 
     print!("\x1b[2J\x1b[H"); 
+
+    let (res_single_std, res_single_pin) = if CONCURRENT_MODE {
+        println!("\n>> STARTING CONCURRENT TEST: Single Symbol (BTCUSDT)");
+        println!(">> Both engines starting simultaneously (15s duration)...");
+        tokio::join!(
+            run_scenario("Single (BTC) - Standard", single.clone(), false, false),
+            run_scenario("Single (BTC) - Pinned", single.clone(), true, false)
+        )
+    } else {
+        println!("\n>> STARTING SEQUENTIAL TEST: Single Symbol (BTCUSDT)");
+        let r1 = run_scenario("Single (BTC) - Standard", single.clone(), false, true).await;
+        let r2 = run_scenario("Single (BTC) - Pinned", single.clone(), true, true).await;
+        (r1, r2)
+    };
     
-    // Warmup
-    run_scenario("1. Single (BTC) - Standard", single.clone(), false).await;
-    
-    // Heavy Load
-    run_scenario("2. Top 50 - Standard Async", top_50.clone(), false).await;
-    
-    // Pinned Thread (Theoretical Best)
-    run_scenario("3. Top 50 - Pinned Threads", top_50.clone(), true).await;
+    let title_std = format!("Top {} - Standard Async", symbol_count);
+    let title_pin = format!("Top {} - Pinned Threads", symbol_count);
+
+    let (res_multi_std, res_multi_pin) = if CONCURRENT_MODE {
+        println!("\n>> STARTING CONCURRENT TEST: Top {} Symbols", symbol_count);
+        println!(">> Both engines starting simultaneously (15s duration)...");
+        tokio::join!(
+            run_scenario(&title_std, top_n_symbols.clone(), false, false),
+            run_scenario(&title_pin, top_n_symbols.clone(), true, false)
+        )
+    } else {
+        println!("\n>> STARTING SEQUENTIAL TEST: Top {} Symbols", symbol_count);
+        let r1 = run_scenario(&title_std, top_n_symbols.clone(), false, true).await;
+        let r2 = run_scenario(&title_pin, top_n_symbols.clone(), true, true).await;
+        (r1, r2)
+    };
+
+    // Final Report
+    let mode_str = if CONCURRENT_MODE { "(Concurrent Run)" } else { "(Sequential Run)" };
+    print_comparison(&format!("Single Symbol {}", mode_str), &res_single_std, &res_single_pin);
+    print_comparison(&format!("Top {} Symbols {}", symbol_count, mode_str), &res_multi_std, &res_multi_pin);
 }

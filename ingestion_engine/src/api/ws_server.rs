@@ -10,7 +10,7 @@ use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 use crate::core::engine::Engine;
 use crate::core::models::{Command, CommandAction, MarketData}; 
-use crate::connectors::binance_spot; 
+use crate::connectors::binance; 
 use crate::utils::config::AppConfig;
 
 
@@ -63,7 +63,7 @@ async fn handle_connection(stream: TcpStream, engine: Engine, config: AppConfig)
                                         let stream_config = cmd.config.unwrap_or_else(|| app_config.get_stream_config());
                                         
                                         tokio::spawn(async move {
-                                            binance_spot::connect_binance(symbol_clone, engine_clone, stream_config, app_config).await;
+                                            binance::connect_binance(symbol_clone, engine_clone, stream_config, app_config).await;
                                         });
                                     }
 

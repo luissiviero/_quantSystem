@@ -6,7 +6,7 @@
 use ingestion_engine::core::engine::Engine;
 use ingestion_engine::core::models::StreamConfig; 
 use ingestion_engine::api::ws_server;
-use ingestion_engine::connectors::binance_spot;
+use ingestion_engine::connectors::binance;
 use ingestion_engine::utils::config::AppConfig;
 
 use tokio::task;
@@ -50,7 +50,7 @@ async fn main() {
             println!("Spawning default ingestion for: {}", symbol);
             
             task::spawn(async move {
-                binance_spot::connect_binance(symbol_clone, engine_clone, stream_config_clone, app_config_clone).await;
+                binance::connect_binance(symbol_clone, engine_clone, stream_config_clone, app_config_clone).await;
             });
         }
     }
@@ -87,7 +87,7 @@ async fn main() {
                         let custom_stream_config = app_config_connector.get_stream_config();
                         
                         task::spawn(async move {
-                            binance_spot::connect_binance(symbol_connector, engine_connector, custom_stream_config, app_config_connector).await;
+                            binance::connect_binance(symbol_connector, engine_connector, custom_stream_config, app_config_connector).await;
                         });
                     } else {
                         println!(">> Symbol {} is already active.", input);
