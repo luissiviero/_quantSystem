@@ -4,6 +4,5 @@
 
 
 pub mod engine_bench;
-// pub mod latency;
-// pub mod log_tester;
+pub mod latency;
 pub mod stream_verifier;
