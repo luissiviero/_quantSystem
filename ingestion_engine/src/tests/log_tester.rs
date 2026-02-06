@@ -1,11 +1,12 @@
-// @file: src/tests/log_tester.rs
+// @file: ingestion_engine/src/tests/log_tester.rs
 // @description: Test suite to verify selective stream ingestion (StreamConfig logic).
-// @author: v5 helper
-// ingestion_engine/src/tests/log_tester.rs
+// @author: LAS.
 
-use crate::interfaces::DataProcessor;
-use crate::models::{MarketData, StreamConfig};
-use crate::engine::Engine;
+use crate::core::interfaces::DataProcessor;
+use crate::core::models::{MarketData, StreamConfig};
+use crate::core::engine::Engine;
+use crate::utils::config::AppConfig;
+use crate::connectors::binance_spot; // Corrected path
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
@@ -46,14 +47,50 @@ impl DataProcessor for SharedValidator {
 
 
 //
+// HELPERS
+//
+
+fn get_test_app_config() -> AppConfig {
+    AppConfig {
+        log_level: "info".to_string(),
+        default_symbols: vec![],
+        broadcast_buffer_size: 1000,
+        trade_history_limit: 100,
+        candle_history_limit: 100,
+        binance_ws_url: "wss://stream.binance.com:9443/ws".to_string(),
+        binance_reconnect_delay: 1,
+        order_book_depth: "20".to_string(),
+        default_raw_trades: true,
+        default_agg_trades: true,
+        default_order_book: true,
+        default_kline_intervals: vec!["1m".to_string()],
+        server_bind_address: "127.0.0.1:8080".to_string(),
+        server_history_fetch_limit: 100,
+    }
+}
+
+fn empty_stream_config() -> StreamConfig {
+    StreamConfig {
+        raw_trades: false,
+        agg_trades: false,
+        order_book: false,
+        kline_intervals: vec![],
+    }
+}
+
+
+//
 // SCENARIO RUNNER
 //
 
-async fn test_configuration(config: StreamConfig, description: &str) {
+async fn test_configuration(stream_config: StreamConfig, description: &str) {
     println!("\n>> TESTING CONFIGURATION: {}", description);
     
     // #1. Setup Engine & Shared State
-    let engine: Engine = Engine::new();
+    let app_config = get_test_app_config();
+    // Engine now requires config
+    let engine: Engine = Engine::new(&app_config);
+    
     let counters: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
     
     let processor: Box<SharedValidator> = Box::new(SharedValidator { 
@@ -67,10 +104,12 @@ async fn test_configuration(config: StreamConfig, description: &str) {
     let symbol: String = "BTCUSDT".to_string();
     engine.request_ingestion(symbol.clone()).await;
     
-    let engine_clone: Engine = engine.clone();
+    let engine_clone = engine.clone();
+    let app_config_clone = app_config.clone();
     
     tokio::spawn(async move {
-        crate::exchanges::binance::connect_binance(symbol, engine_clone, config).await;
+        // Corrected path and arguments
+        binance_spot::connect_binance(symbol, engine_clone, stream_config, app_config_clone).await;
     });
 
     // #3. Collect Data
@@ -103,39 +142,26 @@ async fn test_configuration(config: StreamConfig, description: &str) {
 #[tokio::test]
 async fn verify_selective_streams() {
     // #1. Test Only Trades
-    let mut cfg_trades: StreamConfig = StreamConfig::default();
+    let mut cfg_trades = empty_stream_config();
     cfg_trades.raw_trades = true;
-    cfg_trades.agg_trades = false;
-    cfg_trades.order_book = false;
-    cfg_trades.kline_intervals = vec![]; // Disable klines
     
     test_configuration(cfg_trades, "ONLY Raw Trades").await;
 
     // #2. Test Only AggTrades
-    let mut cfg_agg: StreamConfig = StreamConfig::default();
-    cfg_agg.raw_trades = false;
+    let mut cfg_agg = empty_stream_config();
     cfg_agg.agg_trades = true;
-    cfg_agg.order_book = false;
-    cfg_agg.kline_intervals = vec![];
 
     test_configuration(cfg_agg, "ONLY AggTrades").await;
 
     // #3. Test Only OrderBook
-    // Note: OrderBooks snapshot immediately, but updates might be slower
-    let mut cfg_book: StreamConfig = StreamConfig::default();
-    cfg_book.raw_trades = false;
-    cfg_book.agg_trades = false;
+    let mut cfg_book = empty_stream_config();
     cfg_book.order_book = true;
-    cfg_book.kline_intervals = vec![];
 
     test_configuration(cfg_book, "ONLY OrderBook").await;
     
     // #4. Test Only 1m Klines (Specific Interval)
-    let mut cfg_kline: StreamConfig = StreamConfig::default();
-    cfg_kline.raw_trades = false;
-    cfg_kline.agg_trades = false;
-    cfg_kline.order_book = false;
-    cfg_kline.kline_intervals = vec!["1m".to_string()]; // Request ONLY 1m
+    let mut cfg_kline = empty_stream_config();
+    cfg_kline.kline_intervals = vec!["1m".to_string()];
 
     test_configuration(cfg_kline, "ONLY 1m Klines").await;
 }

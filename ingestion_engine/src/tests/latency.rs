@@ -1,10 +1,11 @@
-// @file: src/tests/logger_processor.rs
+// @file: ingestion_engine/src/tests/latency.rs
 // @description: Test processor that logs all market data to stdout to verify Binance stream.
-// @author: v5 helper
+// @author: LAS.
 
-use crate::interfaces::DataProcessor;
-use crate::models::{MarketData, StreamConfig}; // #1. Added StreamConfig import
-use crate::engine::Engine;
+use crate::core::interfaces::DataProcessor;
+use crate::core::models::{MarketData, StreamConfig}; 
+use crate::core::engine::Engine;
+use crate::utils::config::AppConfig;
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
@@ -13,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::HashMap;
 use serde::Deserialize;
+
 
 //
 // DYNAMIC SYMBOL FETCHING
@@ -51,6 +53,7 @@ async fn fetch_top_volume_symbols(limit: usize) -> Vec<String> {
     println!(">> Top 3 Symbols: {:?}", &top_symbols[0..3]);
     top_symbols
 }
+
 
 //
 // DASHBOARD STATE STRUCT
@@ -96,6 +99,7 @@ impl DashboardState {
         }
     }
 }
+
 
 //
 // LOG PROCESSOR STRUCT
@@ -224,6 +228,7 @@ impl DataProcessor for LogProcessor {
     }
 }
 
+
 //
 // HELPER: SCENARIO RUNNER
 //
@@ -231,7 +236,28 @@ impl DataProcessor for LogProcessor {
 async fn run_scenario(title: &str, symbols: Vec<String>, use_pinned: bool) {
     println!("Successfully connected to Binance"); 
     
-    let engine = Engine::new();
+    // #2. Create Mock Config for Test
+    // UPDATED: Added server settings to mock
+    let test_config = AppConfig {
+        log_level: "info".to_string(),
+        default_symbols: vec![],
+        broadcast_buffer_size: 10000, 
+        trade_history_limit: 100,
+        candle_history_limit: 100,
+        binance_ws_url: "wss://stream.binance.com:9443/ws".to_string(),
+        binance_reconnect_delay: 60,
+        order_book_depth: "20".to_string(),
+        default_raw_trades: true,
+        default_agg_trades: true,
+        default_order_book: true,
+        default_kline_intervals: vec!["1m".to_string()],
+        // New Server Settings
+        server_bind_address: "127.0.0.1:8080".to_string(),
+        server_history_fetch_limit: 1000,
+    };
+
+    // #3. Initialize Engine with Config
+    let engine = Engine::new(&test_config);
     let active_flag = Arc::new(AtomicBool::new(true));
     
     engine.register_processor(Box::new(LogProcessor::new(title.to_string(), active_flag.clone()))).await;
@@ -240,9 +266,9 @@ async fn run_scenario(title: &str, symbols: Vec<String>, use_pinned: bool) {
         if engine.request_ingestion(symbol.clone()).await {
             let engine_clone = engine.clone();
             let symbol_clone = symbol.clone();
+            let app_config_clone = test_config.clone(); // Clone for connector
 
-            // #2. Create Config for Test (Default: All streams)
-            let config = StreamConfig::default();
+            let config = test_config.get_stream_config();
 
             if use_pinned {
                 std::thread::Builder::new()
@@ -254,15 +280,13 @@ async fn run_scenario(title: &str, symbols: Vec<String>, use_pinned: bool) {
                             .expect("Failed to build dedicated runtime");
                         
                         rt.block_on(async move {
-                             // #3. Pass Config here
-                             crate::exchanges::binance::connect_binance(symbol_clone, engine_clone, config).await;
+                             crate::connectors::binance_spot::connect_binance(symbol_clone, engine_clone, config, app_config_clone).await;
                         });
                     })
                     .expect("Failed to spawn pinned thread");
             } else {
                 tokio::spawn(async move {
-                    // #4. Pass Config here
-                    crate::exchanges::binance::connect_binance(symbol_clone, engine_clone, config).await;
+                    crate::connectors::binance_spot::connect_binance(symbol_clone, engine_clone, config, app_config_clone).await;
                 });
             }
             
@@ -276,6 +300,7 @@ async fn run_scenario(title: &str, symbols: Vec<String>, use_pinned: bool) {
 
     active_flag.store(false, Ordering::Relaxed);
 }
+
 
 //
 // MAIN TEST SUITE

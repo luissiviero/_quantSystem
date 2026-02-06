@@ -1,0 +1,16 @@
+[package]
+name = "rust_core"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance computation kernels for quant_core"
+
+[lib]
+# MUST match the function name in lib.rs
+name = "rust_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+# extension-module is required to link against the Python library
+pyo3 = { version = "0.20", features = ["extension-module"] }
+# Numpy is required for passing arrays efficiently
+numpy = "0.20"

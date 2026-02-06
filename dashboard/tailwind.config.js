@@ -1,5 +1,6 @@
-// @file: tailwind.config.js
+// @file: dashboard\tailwind.config.js
 // @description: Defines the content sources for Tailwind CSS to scan.
+// @author: LAS.
 
 /** @type {import('tailwindcss').Config} */
 export default {
