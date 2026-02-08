@@ -1,13 +1,12 @@
 // @file: ingestion_engine/src/main.rs
-// @description: Entry point. Orchestrates Engine, Server, and CLI Input.
+// @description: Entry point updated to support manual commands with Exchange/Market context.
 // @author: LAS.
 
-
 use ingestion_engine::core::engine::Engine;
-use ingestion_engine::core::models::StreamConfig; 
 use ingestion_engine::api::ws_server;
-use ingestion_engine::connectors::binance;
+use ingestion_engine::connectors; // Use Factory
 use ingestion_engine::utils::config::AppConfig;
+use ingestion_engine::core::models::{Exchange, MarketType}; // Import Enums
 
 use tokio::task;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -33,38 +32,44 @@ async fn main() {
 
     println!("Starting QuantSystem Ingestion Engine...");
     println!("Log Level: {}", config.log_level);
-    println!("Interactive Mode: Type a symbol (e.g., SOLUSDT) and press Enter to ingest.");
+    println!("Interactive Mode: Type 'EXCHANGE:MARKET:SYMBOL' (e.g., BINANCE:SPOT:SOLUSDT) or just SYMBOL (defaults to Binance Spot).");
 
+    // #2. Spawn Defaults (Assuming Binance Spot for legacy defaults)
     let defaults: Vec<String> = config.default_symbols.clone();
-    
-    // CHANGED: Use helper method instead of StreamConfig::default()
-    let default_stream_config: StreamConfig = config.get_stream_config();
+    let default_stream_config = config.get_stream_config();
 
     for symbol in defaults {
-        if engine.request_ingestion(symbol.clone()).await {
+        let unique_id: String = format!("BINANCE_SPOT_{}", symbol).to_uppercase();
+        
+        if engine.request_ingestion(unique_id).await {
             let engine_clone = engine.clone();
             let symbol_clone = symbol.clone();
-            let stream_config_clone = default_stream_config.clone();
-            let app_config_clone = config.clone(); 
-            
-            println!("Spawning default ingestion for: {}", symbol);
+            let stream_cfg = default_stream_config.clone();
+            let app_cfg = config.clone();
             
             task::spawn(async move {
-                binance::connect_binance(symbol_clone, engine_clone, stream_config_clone, app_config_clone).await;
+                connectors::spawn_connector(
+                    Exchange::Binance,
+                    MarketType::Spot,
+                    symbol_clone,
+                    engine_clone,
+                    stream_cfg,
+                    app_cfg
+                ).await;
             });
         }
     }
 
-    // #2. Spawn Server
-    let engine_clone_server = engine.clone();
-    let config_clone_server = config.clone(); 
+    // #3. Spawn Server
+    let engine_server = engine.clone();
+    let config_server = config.clone(); 
     let server_task = task::spawn(async move {
-        ws_server::start_server(engine_clone_server, config_clone_server).await;
+        ws_server::start_server(engine_server, config_server).await;
     });
 
-    // #3. CLI Input Task
-    let engine_clone_cli = engine.clone();
-    let config_clone_cli = config.clone();
+    // #4. CLI Input Task
+    let engine_cli = engine.clone();
+    let config_cli = config.clone();
     let cli_task = task::spawn(async move {
         let stdin = tokio::io::stdin();
         let mut reader = BufReader::new(stdin);
@@ -76,21 +81,44 @@ async fn main() {
                 let input: String = line.trim().to_uppercase();
                 
                 if !input.is_empty() {
-                    if engine_clone_cli.request_ingestion(input.clone()).await {
-                        println!(">> Manual command received. Spawning handler for: {}", input);
-                        
-                        let engine_connector = engine_clone_cli.clone();
-                        let symbol_connector = input.clone();
-                        let app_config_connector = config_clone_cli.clone();
-
-                        // CHANGED: Use helper method
-                        let custom_stream_config = app_config_connector.get_stream_config();
-                        
-                        task::spawn(async move {
-                            binance::connect_binance(symbol_connector, engine_connector, custom_stream_config, app_config_connector).await;
-                        });
+                    // Simple parsing logic: EXCHANGE:MARKET:SYMBOL or just SYMBOL
+                    let parts: Vec<&str> = input.split(':').collect();
+                    
+                    let (exchange, market, symbol) = if parts.len() == 3 {
+                        let ex = match parts[0] {
+                            "BINANCE" => Exchange::Binance,
+                            "BYBIT" => Exchange::Bybit,
+                            _ => Exchange::Binance
+                        };
+                        let mk = match parts[1] {
+                            "SPOT" => MarketType::Spot,
+                            "FUTURE" | "LINEAR" => MarketType::LinearFuture,
+                            _ => MarketType::Spot
+                        };
+                        (ex, mk, parts[2].to_string())
                     } else {
-                        println!(">> Symbol {} is already active.", input);
+                        (Exchange::Binance, MarketType::Spot, input.clone())
+                    };
+
+                    let unique_id = format!("{}_{}_{}", exchange, market, symbol);
+
+                    if engine_cli.request_ingestion(unique_id.clone()).await {
+                        println!(">> Spawning handler for: {} ({:?} {:?})", symbol, exchange, market);
+                        
+                        let eng = engine_cli.clone();
+                        let cfg = config_cli.clone();
+                        let stream_cfg = cfg.get_stream_config();
+                        
+                        connectors::spawn_connector(
+                            exchange,
+                            market,
+                            symbol,
+                            eng,
+                            stream_cfg,
+                            cfg
+                        ).await;
+                    } else {
+                        println!(">> {} is already active.", unique_id);
                     }
                 }
             }

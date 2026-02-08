@@ -13,11 +13,8 @@ mod stream_verification_tests {
     //
     // MOCK CONNECTOR SIMULATION
     //
-    // This function mimics the logic inside `binance_spot.rs`.
-    // It attempts to send ALL data types, but is guarded by the `StreamConfig`.
-    // This verifies that if the connector logic is sound, the Engine receives only what is requested.
     async fn mock_connector_loop(symbol: String, engine: Engine, config: StreamConfig) {
-        // 1. Simulate Order Book Update (Heavy Data)
+        // 1. Simulate Order Book Update
         if config.order_book {
             let book = OrderBook {
                 symbol: symbol.clone(),
@@ -28,7 +25,7 @@ mod stream_verification_tests {
             engine.update_order_book(symbol.clone(), book).await;
         }
 
-        // 2. Simulate Raw Trade (High Frequency Data)
+        // 2. Simulate Raw Trade
         if config.raw_trades {
             let trade = Trade {
                 id: 1,
@@ -39,11 +36,6 @@ mod stream_verification_tests {
                 side: TradeSide::Buy,
             };
             engine.add_trade(symbol.clone(), trade).await;
-        }
-
-        // 3. Simulate Agg Trade
-        if config.agg_trades {
-            // Logic omitted for brevity, similar to above
         }
     }
 
@@ -59,7 +51,12 @@ mod stream_verification_tests {
             broadcast_buffer_size: 100,
             trade_history_limit: 10,
             candle_history_limit: 10,
-            binance_ws_url: "".to_string(),
+            
+            // Updated Settings
+            binance_spot_ws_url: "".to_string(),
+            binance_linear_future_ws_url: "".to_string(),
+            binance_inverse_future_ws_url: "".to_string(),
+            
             binance_reconnect_delay: 0,
             order_book_depth: "5".to_string(),
             default_raw_trades: true,
@@ -88,11 +85,9 @@ mod stream_verification_tests {
         mock_connector_loop(symbol.clone(), engine.clone(), safe_config).await;
 
         // #4. Verify Output
-        // We expect exactly one message (Trade). If we get OrderBook, the test fails.
         let mut received_trade = false;
         let mut received_ob = false;
 
-        // Listen for a short window
         let listen_duration = Duration::from_millis(100);
         let start = tokio::time::Instant::now();
 
@@ -106,10 +101,8 @@ mod stream_verification_tests {
             }
         }
 
-        // #5. Assertions
         assert!(received_trade, "CRITICAL: Engine failed to broadcast requested Trade data.");
-        assert!(!received_ob, "FATAL: Data Leak! Engine broadcasted OrderBook data despite 'order_book: false'. Bandwidth wasted.");
-
+        assert!(!received_ob, "FATAL: Data Leak! Engine broadcasted OrderBook data despite 'order_book: false'.");
         println!(">> SUCCESS: System respected the filter. Only Trades received.");
     }
 
@@ -119,13 +112,14 @@ mod stream_verification_tests {
     #[tokio::test]
     async fn test_verify_order_book_only_filter() {
         let app_config = AppConfig {
-            // ... (defaults irrelevant for this test as we override StreamConfig)
             log_level: "error".to_string(),
             default_symbols: vec![],
             broadcast_buffer_size: 100,
             trade_history_limit: 10,
             candle_history_limit: 10,
-            binance_ws_url: "".to_string(),
+            binance_spot_ws_url: "".to_string(),
+            binance_linear_future_ws_url: "".to_string(),
+            binance_inverse_future_ws_url: "".to_string(),
             binance_reconnect_delay: 0,
             order_book_depth: "5".to_string(),
             default_raw_trades: true,
@@ -152,7 +146,6 @@ mod stream_verification_tests {
         let mut received_trade = false;
         let mut received_ob = false;
 
-        // Drain channel
         while let Ok(Ok((_, data))) = timeout(Duration::from_millis(50), rx.recv()).await {
              match *data {
                 MarketData::Trade(_) => received_trade = true,
@@ -178,7 +171,9 @@ mod stream_verification_tests {
             broadcast_buffer_size: 100,
             trade_history_limit: 10,
             candle_history_limit: 10,
-            binance_ws_url: "".to_string(),
+            binance_spot_ws_url: "".to_string(),
+            binance_linear_future_ws_url: "".to_string(),
+            binance_inverse_future_ws_url: "".to_string(),
             binance_reconnect_delay: 0,
             order_book_depth: "20".to_string(),
             default_raw_trades: true,
@@ -192,7 +187,7 @@ mod stream_verification_tests {
         let stream_config = app_config.get_stream_config();
 
         assert_eq!(stream_config.raw_trades, true);
-        assert_eq!(stream_config.agg_trades, false); // Should match config
+        assert_eq!(stream_config.agg_trades, false); 
         assert_eq!(stream_config.order_book, true);
         assert_eq!(stream_config.kline_intervals.len(), 1);
         assert_eq!(stream_config.kline_intervals[0], "1h");

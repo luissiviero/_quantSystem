@@ -1,5 +1,5 @@
 // @file: ingestion_engine/src/utils/config.rs
-// @description: Centralized application configuration handling using config crate.
+// @description: Configuration handling with support for multiple exchange endpoints.
 // @author: LAS.
 
 use serde::Deserialize;
@@ -20,8 +20,10 @@ pub struct AppConfig {
     pub trade_history_limit: usize,
     pub candle_history_limit: usize,
 
-    // Binance Settings
-    pub binance_ws_url: String,
+    // Binance URLs
+    pub binance_spot_ws_url: String,
+    pub binance_linear_future_ws_url: String,
+    pub binance_inverse_future_ws_url: String,
     pub binance_reconnect_delay: u64,
     pub order_book_depth: String,
 
@@ -48,10 +50,15 @@ impl AppConfig {
             .set_default("broadcast_buffer_size", 5000)?
             .set_default("trade_history_limit", 100)?
             .set_default("candle_history_limit", 5000)?
-            // Default Binance Settings
-            .set_default("binance_ws_url", "wss://stream.binance.com:9443/ws")?
+            
+            // #1. Binance Endpoints
+            .set_default("binance_spot_ws_url", "wss://stream.binance.com:9443/ws")?
+            .set_default("binance_linear_future_ws_url", "wss://fstream.binance.com/ws")?
+            .set_default("binance_inverse_future_ws_url", "wss://dstream.binance.com/ws")?
+            
             .set_default("binance_reconnect_delay", 60)?
             .set_default("order_book_depth", "20")?
+            
             // Stream Defaults
             .set_default("default_raw_trades", true)?
             .set_default("default_agg_trades", true)?
@@ -59,9 +66,11 @@ impl AppConfig {
             .set_default("default_kline_intervals", vec![
                 "1m", "5m", "15m", "1h", "4h", "1d"
             ])?
+            
             // Server Defaults
             .set_default("server_bind_address", "127.0.0.1:8080")?
             .set_default("server_history_fetch_limit", 1000)?
+            
             // File & Env Overrides
             .add_source(File::with_name("config").required(false))
             .add_source(Environment::with_prefix("APP"));

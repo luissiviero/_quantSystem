@@ -35,7 +35,12 @@ mod throughput_tests {
             broadcast_buffer_size: 100_000, 
             trade_history_limit: 100,
             candle_history_limit: 1000,
-            binance_ws_url: "wss://stream.binance.com:9443/ws".to_string(),
+            
+            // Updated Binance Settings
+            binance_spot_ws_url: "wss://stream.binance.com:9443/ws".to_string(),
+            binance_linear_future_ws_url: "wss://fstream.binance.com/ws".to_string(),
+            binance_inverse_future_ws_url: "wss://dstream.binance.com/ws".to_string(),
+            
             binance_reconnect_delay: 5,
             order_book_depth: "20".to_string(),
             default_raw_trades: true,

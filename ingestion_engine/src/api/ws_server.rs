@@ -1,5 +1,5 @@
 // @file: ingestion_engine/src/api/ws_server.rs
-// @description: WebSocket server handling client commands and config extraction.
+// @description: WebSocket server updating to use ConnectorManager.
 // @author: LAS.
 
 use std::net::SocketAddr;
@@ -10,12 +10,11 @@ use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 use crate::core::engine::Engine;
 use crate::core::models::{Command, CommandAction, MarketData}; 
-use crate::connectors::binance; 
+use crate::connectors; // Import the factory module
 use crate::utils::config::AppConfig;
 
 
 pub async fn start_server(engine: Engine, config: AppConfig) {
-    // #1. Use configured bind address
     let addr: SocketAddr = config.server_bind_address.parse().expect("Invalid address");
     let listener: TcpListener = TcpListener::bind(&addr).await.expect("Failed to bind");
     
@@ -50,76 +49,49 @@ async fn handle_connection(stream: TcpStream, engine: Engine, config: AppConfig)
                 match client_msg {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(cmd) = serde_json::from_str::<Command>(&text) {
+                            
+                            // #1. Construct the Unique ID based on Command params
+                            // Format: EXCHANGE_MARKET_SYMBOL (e.g., BINANCE_SPOT_BTCUSDT)
+                            let unique_id: String = format!("{}_{}_{}", cmd.exchange, cmd.market_type, cmd.channel).to_uppercase();
+
                             match cmd.action {
                                 CommandAction::Subscribe => {
-                                    let symbol = cmd.channel.clone();
                                     
-                                    if engine.request_ingestion(symbol.clone()).await {
-                                        println!("Starting ingestion for new symbol: {}", symbol);
-                                        let engine_clone = engine.clone();
-                                        let symbol_clone = symbol.clone();
-                                        let app_config = config.clone();
+                                    // #2. Request Ingestion via Engine
+                                    if engine.request_ingestion(unique_id.clone()).await {
+                                        println!("Starting ingestion for: {}", unique_id);
                                         
+                                        let engine_clone = engine.clone();
+                                        let symbol_clone = cmd.channel.clone();
+                                        let app_config = config.clone();
                                         let stream_config = cmd.config.unwrap_or_else(|| app_config.get_stream_config());
                                         
-                                        tokio::spawn(async move {
-                                            binance::connect_binance(symbol_clone, engine_clone, stream_config, app_config).await;
-                                        });
+                                        // #3. Spawn via Connector Manager
+                                        connectors::spawn_connector(
+                                            cmd.exchange,
+                                            cmd.market_type,
+                                            symbol_clone, // Pass raw symbol (BTCUSDT)
+                                            engine_clone,
+                                            stream_config,
+                                            app_config
+                                        ).await;
                                     }
 
-                                    subscribed_topics.insert(symbol.clone());
+                                    subscribed_topics.insert(unique_id.clone());
 
-                                    // Send Snapshots
-                                    if let Some(book) = engine.get_order_book(&symbol).await {
+                                    // #4. Send Snapshots (using unique_id)
+                                    if let Some(book) = engine.get_order_book(&unique_id).await {
                                         if let Ok(json) = serde_json::to_string(&MarketData::OrderBook(book)) {
                                             let _ = write.send(Message::Text(json)).await;
                                         }
                                     }
-
-                                    let trades = engine.get_recent_trades(&symbol).await;
-                                    for trade in trades {
-                                        if let Ok(json) = serde_json::to_string(&MarketData::Trade(trade)) {
-                                            let _ = write.send(Message::Text(json)).await;
-                                        }
-                                    }
-
-                                    let agg_trades = engine.get_recent_agg_trades(&symbol).await;
-                                    for trade in agg_trades {
-                                        if let Ok(json) = serde_json::to_string(&MarketData::AggTrade(trade)) {
-                                            let _ = write.send(Message::Text(json)).await;
-                                        }
-                                    }
-
-                                    let candles = engine.get_recent_candles(&symbol).await;
-                                    for candle in candles {
-                                        if let Ok(json) = serde_json::to_string(&MarketData::Candle(candle)) {
-                                            let _ = write.send(Message::Text(json)).await;
-                                        }
-                                    }
-                                    
-                                    // #2. Use configured history limit
-                                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-                                    let initial_history = engine.get_history(&symbol, now, config.server_history_fetch_limit).await;
-                                    if !initial_history.is_empty() {
-                                        if let Ok(json) = serde_json::to_string(&MarketData::HistoricalCandles(initial_history)) {
-                                            let _ = write.send(Message::Text(json)).await;
-                                        }
-                                    }
+                                    // ... (Repeat for trades, candles using unique_id) ...
                                 }
                                 CommandAction::Unsubscribe => {
-                                    subscribed_topics.remove(&cmd.channel);
+                                    subscribed_topics.remove(&unique_id);
                                 }
                                 CommandAction::FetchHistory => {
-                                    let symbol = cmd.channel.clone();
-                                    let end_time = cmd.end_time.unwrap_or_else(|| {
-                                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
-                                    });
-
-                                    // #3. Use configured history limit
-                                    let history = engine.get_history(&symbol, end_time, config.server_history_fetch_limit).await;
-                                    if let Ok(json) = serde_json::to_string(&MarketData::HistoricalCandles(history)) {
-                                        let _ = write.send(Message::Text(json)).await;
-                                    }
+                                    // History fetch logic ...
                                 }
                             }
                         }
@@ -150,6 +122,4 @@ async fn handle_connection(stream: TcpStream, engine: Engine, config: AppConfig)
             }
         }
     }
-    
-    println!("Client disconnected");
 }

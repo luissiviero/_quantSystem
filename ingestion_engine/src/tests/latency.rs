@@ -4,7 +4,7 @@
 #![allow(dead_code)] // Suppress "unused" warnings during normal builds (helper functions are only used in #[test])
 
 use crate::core::interfaces::DataProcessor;
-use crate::core::models::{MarketData}; 
+use crate::core::models::{MarketData, MarketType}; 
 use crate::core::engine::Engine;
 use crate::utils::config::AppConfig;
 use async_trait::async_trait;
@@ -162,9 +162,6 @@ impl DataProcessor for LatencyProcessor {
         // --- 2. Trade Processing ---
         if let MarketData::Trade(t) = &*data {
             // Correct Timestamp Drift
-            // If Binance says 1000, and our offset is +50 (we are ahead), 
-            // Normalized Server Time = 1000 + 50 = 1050.
-            // Latency = Local(1055) - Normalized(1050) = 5ms.
             let adjusted_server_time = (t.timestamp_ms as i64) + self.clock_offset;
             let latency = (now_ms as i64) - adjusted_server_time;
 
@@ -173,11 +170,6 @@ impl DataProcessor for LatencyProcessor {
 
             // Gap Detection (Requires Lock, but scoped strictly)
             {
-                // We try read first (optimistic), but since we ALWAYS update,
-                // we might as well go straight to write lock for this specific symbol check.
-                // However, holding a global write lock on the HashMap is bad for concurrency.
-                // A production system would use sharded maps. 
-                // For this test, RwLock is "Okay" but represents the main bottleneck.
                 let mut guard = self.last_ids.write().unwrap();
                 let last_id = guard.entry(t.symbol.clone()).or_insert(0);
                 
@@ -188,7 +180,6 @@ impl DataProcessor for LatencyProcessor {
             }
 
             // Update UI String (Non-blocking check)
-            // We only update the string occasionally to avoid mutex contention
             if t.id % 50 == 0 {
                 if let Ok(mut str_guard) = self.stats.last_trade_info.try_lock() {
                     *str_guard = format!("{} @ {:.2} [Lat: {}ms]", t.symbol, t.price, latency);
@@ -248,9 +239,6 @@ async fn run_monitor(stats: Arc<TestStats>, title: String, active: Arc<AtomicBoo
 
 // UPDATED: Now accepts enable_ui flag to silence output during concurrent runs
 async fn run_scenario(title: &str, symbols: Vec<String>, use_pinned: bool, enable_ui: bool) -> ScenarioResult {
-    // Only perform clock sync if UI is enabled (otherwise rely on pre-synced time or minimal output)
-    // Actually, we need accurate latency calc, so we must sync or pass offset. 
-    // For simplicity, we fetch it here. In concurrent mode, both will fetch, which is fine.
     let offset = get_clock_offset_ms().await;
     let start_time = SystemTime::now();
     
@@ -264,7 +252,12 @@ async fn run_scenario(title: &str, symbols: Vec<String>, use_pinned: bool, enabl
         broadcast_buffer_size: 100_000, 
         trade_history_limit: 100,
         candle_history_limit: 100,
-        binance_ws_url: "wss://stream.binance.com:9443/ws".to_string(),
+        
+        // Updated Binance Settings
+        binance_spot_ws_url: "wss://stream.binance.com:9443/ws".to_string(),
+        binance_linear_future_ws_url: "wss://fstream.binance.com/ws".to_string(),
+        binance_inverse_future_ws_url: "wss://dstream.binance.com/ws".to_string(),
+        
         binance_reconnect_delay: 60,
         order_book_depth: "20".to_string(),
         default_raw_trades: true,
@@ -294,22 +287,40 @@ async fn run_scenario(title: &str, symbols: Vec<String>, use_pinned: bool, enabl
 
     // Spawn Connections
     for symbol in symbols {
-        if engine.request_ingestion(symbol.clone()).await {
+        let unique_id: String = format!("BINANCE_SPOT_{}", symbol).to_uppercase();
+        
+        if engine.request_ingestion(unique_id.clone()).await {
             let engine_clone = engine.clone();
             let sym = symbol.clone();
+            let uid = unique_id.clone();
             let cfg = test_config.clone();
             let stream_cfg = cfg.get_stream_config();
 
+            // Updated connector call signature
             if use_pinned {
                 std::thread::Builder::new().name(format!("w-{}", sym)).spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
                     rt.block_on(async move {
-                         crate::connectors::binance::connect_binance(sym, engine_clone, stream_cfg, cfg).await;
+                         crate::connectors::binance::connect_binance(
+                             sym, 
+                             uid,
+                             MarketType::Spot,
+                             engine_clone, 
+                             stream_cfg, 
+                             cfg
+                        ).await;
                     });
                 }).unwrap();
             } else {
                 tokio::spawn(async move {
-                    crate::connectors::binance::connect_binance(sym, engine_clone, stream_cfg, cfg).await;
+                    crate::connectors::binance::connect_binance(
+                        sym,
+                        uid,
+                        MarketType::Spot,
+                        engine_clone, 
+                        stream_cfg, 
+                        cfg
+                    ).await;
                 });
             }
             if use_pinned { sleep(Duration::from_millis(5)).await; }
