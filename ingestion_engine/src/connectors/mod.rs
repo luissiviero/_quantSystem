@@ -1,8 +1,9 @@
 // @file: ingestion_engine/src/connectors/mod.rs
-// @description: Factory module for spawning connector tasks based on Exchange/MarketType.
+// @description: Factory module updated to include the REST client module.
 // @author: LAS.
 
 pub mod binance;
+pub mod binance_rest; // New Module
 
 use crate::core::models::{Exchange, MarketType, StreamConfig};
 use crate::core::engine::Engine;

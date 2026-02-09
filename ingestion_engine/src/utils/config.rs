@@ -1,5 +1,5 @@
 // @file: ingestion_engine/src/utils/config.rs
-// @description: Configuration handling with support for multiple exchange endpoints.
+// @description: Configuration updated with defaults for new feature streams.
 // @author: LAS.
 
 use serde::Deserialize;
@@ -32,6 +32,16 @@ pub struct AppConfig {
     pub default_agg_trades: bool,
     pub default_order_book: bool,
     pub default_kline_intervals: Vec<String>,
+    
+    // NEW DEFAULTS (Stand-ins)
+    pub default_ticker: bool,
+    pub default_book_ticker: bool,
+    pub default_mark_price: bool,
+    pub default_index_price: bool,
+    pub default_liquidation: bool,
+    pub default_funding_rate: bool,
+    pub default_open_interest: bool,
+    pub default_greeks: bool,
 
     // Server Settings
     pub server_bind_address: String,
@@ -51,21 +61,30 @@ impl AppConfig {
             .set_default("trade_history_limit", 100)?
             .set_default("candle_history_limit", 5000)?
             
-            // #1. Binance Endpoints
+            // Binance Endpoints
             .set_default("binance_spot_ws_url", "wss://stream.binance.com:9443/ws")?
             .set_default("binance_linear_future_ws_url", "wss://fstream.binance.com/ws")?
             .set_default("binance_inverse_future_ws_url", "wss://dstream.binance.com/ws")?
-            
             .set_default("binance_reconnect_delay", 60)?
             .set_default("order_book_depth", "20")?
             
-            // Stream Defaults
+            // Stream Defaults (Existing)
             .set_default("default_raw_trades", true)?
             .set_default("default_agg_trades", true)?
             .set_default("default_order_book", true)?
             .set_default("default_kline_intervals", vec![
                 "1m", "5m", "15m", "1h", "4h", "1d"
             ])?
+            
+            // Stream Defaults (New - defaulting to false for now)
+            .set_default("default_ticker", false)?
+            .set_default("default_book_ticker", false)?
+            .set_default("default_mark_price", false)?
+            .set_default("default_index_price", false)?
+            .set_default("default_liquidation", false)?
+            .set_default("default_funding_rate", false)?
+            .set_default("default_open_interest", false)?
+            .set_default("default_greeks", false)?
             
             // Server Defaults
             .set_default("server_bind_address", "127.0.0.1:8080")?
@@ -85,6 +104,16 @@ impl AppConfig {
             agg_trades: self.default_agg_trades,
             order_book: self.default_order_book,
             kline_intervals: self.default_kline_intervals.clone(),
+            
+            // New Fields
+            ticker: self.default_ticker,
+            book_ticker: self.default_book_ticker,
+            mark_price: self.default_mark_price,
+            index_price: self.default_index_price,
+            liquidation: self.default_liquidation,
+            funding_rate: self.default_funding_rate,
+            open_interest: self.default_open_interest,
+            greeks: self.default_greeks,
         }
     }
 }

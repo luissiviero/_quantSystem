@@ -1,5 +1,5 @@
 // @file: ingestion_engine/src/tests/stream_verifier.rs
-// @description: Integration test ensuring StreamConfig logic correctly filters data streams to prevent bandwidth saturation.
+// @description: Integration test ensuring StreamConfig logic correctly filters data streams with new fields.
 // @author: LAS.
 
 #[cfg(test)]
@@ -63,6 +63,17 @@ mod stream_verification_tests {
             default_agg_trades: true,
             default_order_book: true,
             default_kline_intervals: vec![],
+            
+            // New Defaults
+            default_ticker: false,
+            default_book_ticker: false,
+            default_mark_price: false,
+            default_index_price: false,
+            default_liquidation: false,
+            default_funding_rate: false,
+            default_open_interest: false,
+            default_greeks: false,
+
             server_bind_address: "127.0.0.1:0".to_string(),
             server_history_fetch_limit: 10,
         };
@@ -75,6 +86,15 @@ mod stream_verification_tests {
             agg_trades: false,
             order_book: false, // <--- CRITICAL: We are disabling the heavy stream
             kline_intervals: vec![],
+            // New Fields
+            ticker: false,
+            book_ticker: false,
+            mark_price: false,
+            index_price: false,
+            liquidation: false,
+            funding_rate: false,
+            open_interest: false,
+            greeks: false,
         };
 
         let symbol = "BTCUSDT".to_string();
@@ -126,6 +146,17 @@ mod stream_verification_tests {
             default_agg_trades: true,
             default_order_book: true,
             default_kline_intervals: vec![],
+            
+            // New Defaults
+            default_ticker: false,
+            default_book_ticker: false,
+            default_mark_price: false,
+            default_index_price: false,
+            default_liquidation: false,
+            default_funding_rate: false,
+            default_open_interest: false,
+            default_greeks: false,
+            
             server_bind_address: "127.0.0.1:0".to_string(),
             server_history_fetch_limit: 10,
         };
@@ -137,6 +168,15 @@ mod stream_verification_tests {
             agg_trades: false,
             order_book: true,  // <--- Enabled
             kline_intervals: vec![],
+            // New Fields
+            ticker: false,
+            book_ticker: false,
+            mark_price: false,
+            index_price: false,
+            liquidation: false,
+            funding_rate: false,
+            open_interest: false,
+            greeks: false,
         };
 
         let symbol = "ETHUSDT".to_string();
@@ -180,6 +220,17 @@ mod stream_verification_tests {
             default_agg_trades: false,
             default_order_book: true,
             default_kline_intervals: vec!["1h".to_string()],
+            
+            // New Defaults
+            default_ticker: false,
+            default_book_ticker: false,
+            default_mark_price: false,
+            default_index_price: false,
+            default_liquidation: false,
+            default_funding_rate: false,
+            default_open_interest: false,
+            default_greeks: false,
+            
             server_bind_address: "127.0.0.1:0".to_string(),
             server_history_fetch_limit: 10,
         };
@@ -191,6 +242,10 @@ mod stream_verification_tests {
         assert_eq!(stream_config.order_book, true);
         assert_eq!(stream_config.kline_intervals.len(), 1);
         assert_eq!(stream_config.kline_intervals[0], "1h");
+        
+        // Assert New Defaults
+        assert_eq!(stream_config.ticker, false);
+        assert_eq!(stream_config.book_ticker, false);
         
         println!(">> SUCCESS: AppConfig correctly maps to StreamConfig defaults.");
     }

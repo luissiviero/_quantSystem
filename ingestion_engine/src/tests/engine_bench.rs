@@ -2,9 +2,6 @@
 // @description: Internal throughput benchmark to stress test Engine serialization and locking.
 // @author: LAS.
 
-// We wrap the test logic in a module. This creates a strictly isolated scope
-// that only exists during testing, preventing "unused import" warnings
-// when the file is compiled as part of the library in release mode.
 #[cfg(test)]
 mod throughput_tests {
     use crate::core::engine::Engine;
@@ -47,6 +44,17 @@ mod throughput_tests {
             default_agg_trades: true,
             default_order_book: true,
             default_kline_intervals: vec!["1m".to_string()],
+            
+            // New Feature Defaults
+            default_ticker: false,
+            default_book_ticker: false,
+            default_mark_price: false,
+            default_index_price: false,
+            default_liquidation: false,
+            default_funding_rate: false,
+            default_open_interest: false,
+            default_greeks: false,
+
             server_bind_address: "127.0.0.1:0".to_string(),
             server_history_fetch_limit: 500,
         };
