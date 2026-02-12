@@ -1,5 +1,6 @@
-// @file: postcss.config.js
+// @file: dashboard\postcss.config.js
 // @description: Configures PostCSS to use Tailwind and Autoprefixer.
+// @author: LAS.
 
 export default {
   // #

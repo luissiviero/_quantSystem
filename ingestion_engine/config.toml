@@ -1,0 +1,28 @@
+# @file: config.toml
+# @description: Runtime configuration for the Ingestion Engine.
+
+# Logging Level (off, error, warn, info, debug, trace)
+log_level = "info"
+
+# Default Symbols to Ingest on Startup
+default_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+
+# Engine Buffer Limits
+broadcast_buffer_size = 5000
+trade_history_limit = 100
+candle_history_limit = 5000
+
+# Binance Connection Settings
+binance_ws_url = "wss://stream.binance.com:9443/ws"
+binance_reconnect_delay = 60
+order_book_depth = "20"
+
+# Default Stream Settings
+default_raw_trades = true
+default_agg_trades = true
+default_order_book = true
+default_kline_intervals = ["1m", "5m", "15m", "1h", "4h", "1d"]
+
+# WebSocket Server Settings
+server_bind_address = "127.0.0.1:8080"
+server_history_fetch_limit = 1000
