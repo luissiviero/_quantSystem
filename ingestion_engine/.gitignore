@@ -16,3 +16,12 @@
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Ignore all Google Drive staging folders
+**/.tmp.drive*/
+**/.tmp.drive.uploads/
+**/Icon\r
+**/.DS_Store
+**/*.gdoc
+**/*.gsheet
+**/*.gslides
