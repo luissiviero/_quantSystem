@@ -6,3 +6,6 @@ Thumbs.db
 # --- IDE SETTINGS ---
 .vscode/
 .idea/
+
+# Ignore all Google Drive staging folders
+**/.tmp.drive*/
